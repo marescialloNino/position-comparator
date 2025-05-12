@@ -21,7 +21,7 @@ class Strategy:
         print(f"Initializing strategy {name} with config: {self.config}")
         self.portfolio: Dict[str, Dict[str, float]] = {}  # asset -> {qty, qty_pctg_aum_at_entry, entry_price, entry_time}
         self.first_timestamp: str = None
-        self.closed_positions: Dict[str, List[Dict]] = {}  # exit_time -> list of closed positions
+        self.closed_positions: Dict[str, List[Dict]] = {}  # exit_time -> list of closed positions (and open positions at latest timestamp)
     
     def get_position_counts(self) -> tuple[int, int]:
         """Return the number of long and short positions."""
@@ -99,7 +99,8 @@ class Strategy:
                         'exit_time': timestamp,
                         'exit_value': exit_value,
                         'realized_pnl': realized_pnl,
-                        'lifetime': lifetime
+                        'lifetime': lifetime,
+                        'status': 'CLOSED'  # Add status flag
                     }
                     if timestamp not in self.closed_positions:
                         self.closed_positions[timestamp] = []
@@ -131,7 +132,8 @@ class Strategy:
                         'exit_time': timestamp,
                         'exit_value': exit_value,
                         'realized_pnl': realized_pnl,
-                        'lifetime': lifetime
+                        'lifetime': lifetime,
+                        'status': 'CLOSED'  # Add status flag
                     }
                     if timestamp not in self.closed_positions:
                         self.closed_positions[timestamp] = []
@@ -168,7 +170,8 @@ class Strategy:
                             'exit_time': timestamp,
                             'exit_value': exit_value,
                             'realized_pnl': realized_pnl,
-                            'lifetime': lifetime
+                            'lifetime': lifetime,
+                            'status': 'CLOSED'  # Add status flag
                         }
                         if timestamp not in self.closed_positions:
                             self.closed_positions[timestamp] = []
@@ -192,7 +195,8 @@ class Strategy:
                             'exit_time': timestamp,
                             'exit_value': exit_value,
                             'realized_pnl': realized_pnl,
-                            'lifetime': lifetime
+                            'lifetime': lifetime,
+                            'status': 'CLOSED'  # Add status flag
                         }
                         if timestamp not in self.closed_positions:
                             self.closed_positions[timestamp] = []
@@ -368,6 +372,7 @@ class Strategy:
         
         # Compute portfolio
         portfolios: Dict[str, Dict] = {}
+        latest_timestamp = None
         try:
             with open(signal_file, 'r') as f:
                 reader = csv.reader(f, delimiter=';')
@@ -417,6 +422,7 @@ class Strategy:
                             'qty': entry.qty,  # Number of tokens
                             'qty_pctg_aum_at_entry': entry.qty_pctg_aum_at_entry,  # Percentage of AUM
                             'entry_price': entry.entry_price,
+                            'entry_time': entry.entry_time,
                             'usd_value_at_entry': entry.qty * entry.entry_price
                         }
                         for entry in self.get_portfolio_at_timestamp()
@@ -428,10 +434,27 @@ class Strategy:
                         'portfolio': current_portfolio,
                         'portfolio_unbalance_ratio_of_aum': unbalance
                     }
+                    # Update the latest timestamp
+                    if latest_timestamp is None or signal['timestamp'] > latest_timestamp:
+                        latest_timestamp = signal['timestamp']
                     # print(f"Processed signal at {signal['timestamp']} for {self.name}: {portfolios[signal['timestamp']]}")
         except FileNotFoundError:
             print(f"Signal file {signal_file} not found")
             return {}
+        
+        # After processing all signals, add any remaining open positions at the latest timestamp
+        if self.portfolio and latest_timestamp:
+            if latest_timestamp not in self.closed_positions:
+                self.closed_positions[latest_timestamp] = []
+            for asset, info in self.portfolio.items():
+                entry = {
+                    'asset': asset,
+                    'entry_time': info['entry_time'],
+                    'entry_price': info['entry_price'],
+                    'entry_value': info['qty'] * info['entry_price'],
+                    'status': 'OPEN'  # Mark as open
+                }
+                self.closed_positions[latest_timestamp].append(entry)
         
         # Write portfolio file
         with open(output_file, 'w') as f:
