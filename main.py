@@ -27,7 +27,7 @@ def main():
             strategy_manager.add_strategy(strat_name, strat_config['type'], strat_config)
     
     # Process all strategy portfolios
-    strategy_manager.process_all_strategies('session_signal.log')
+    strategy_manager.process_all_strategies('session_bin_signal.log')
     
     # Build account portfolios
     accounts = set()
