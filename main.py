@@ -1,9 +1,19 @@
+#!/usr/bin/env python3
 import json
 import os
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime
 from strategies import StrategyManager
+import sys
+from pathlib import Path
+import pandas as pd
+
+# Add project root to path for imports
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# Import from calculate_pnl.py
+from calculate_pnl import compute_unrealized_timeline, load_price_matrix, load_portfolios
 
 def main():
     config_file = 'config_test.json'
@@ -39,7 +49,6 @@ def main():
     for account in accounts:
         print(f"Building portfolio for account: {account}")
         strategy_manager.build_account_portfolio(account)
-    
 
 if __name__ == '__main__':
     main()

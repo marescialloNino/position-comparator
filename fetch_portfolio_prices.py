@@ -3,16 +3,20 @@
 fetch_portfolio_prices.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 Incrementally fetch 15-minute open prices for Binance futures tickers, limited to
-time-windows when positions existed (closed or open), writing per-ticker CSV files
+expanded time-windows when positions existed (closed or open), writing per-ticker CSV files
 immediately, and then aggregating into a consolidated matrix.
 """
+
+
+# HOW TO HANDLE TINY TOKENS? ARE THEM ALREADY WITH THE PROPER NAME ON THE LOGS FILE?
+
 
 import json
 import os
 import sys
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
-from datetime import datetime
+from typing import List, Tuple, Dict
+from datetime import datetime, timedelta
 
 import pandas as pd
 from tqdm import tqdm
@@ -24,16 +28,16 @@ from datafeed.utils_online import extract_coin
 import datafeed.binancefeed as bf
 
 # --- CONFIG ---
-MODULE_DIR    = Path(__file__).resolve().parent
-OUTPUT_DIR    = MODULE_DIR / "binance_data"
+MODULE_DIR                = Path(__file__).resolve().parent
+OUTPUT_DIR                = MODULE_DIR / "binance_data"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-COVERAGE_FILE = OUTPUT_DIR / "binance_price_coverage.json"
-UNAVAILABLE_TICKERS_FILE = OUTPUT_DIR / "binance_unavailable_tickers.json"
-TIMEFRAME     = "15m"
-BAR_INTERVAL  = pd.Timedelta(minutes=15)
-PROGRESS_LOG  = OUTPUT_DIR / "download_progress.log"
-ERROR_LOG     = OUTPUT_DIR / "download_errors.log"
-AGG_CSV       = OUTPUT_DIR / "binance_open_15m.csv"
+COVERAGE_FILE             = OUTPUT_DIR / "binance_price_coverage.json"
+UNAVAILABLE_TICKERS_FILE  = OUTPUT_DIR / "binance_unavailable_tickers.json"
+TIMEFRAME                 = "15m"
+BAR_INTERVAL              = pd.Timedelta(minutes=15)
+PROGRESS_LOG              = OUTPUT_DIR / "download_progress.log"
+ERROR_LOG                 = OUTPUT_DIR / "download_errors.log"
+AGG_CSV                   = OUTPUT_DIR / "binance_open_15m.csv"
 
 # --- SYMBOL BUILDER ---
 def map_to_binance_symbol_and_factor(ticker: str) -> Tuple[str, float]:
@@ -46,7 +50,10 @@ def map_to_binance_symbol_and_factor(ticker: str) -> Tuple[str, float]:
 
 # --- SCAN POSITION WINDOWS ---
 def scan_tickers_and_windows(config_file: str = "config_test.json") -> Dict[str, List[Tuple[datetime, datetime]]]:
-    """Return a dict mapping each ticker to a list of merged windows when it had closed positions across all strategies."""
+    """
+    Return a dict mapping each ticker to a list of merged windows when it had closed positions across all strategies,
+    expanded by 30 minutes before and after each window.
+    """
     try:
         cfg = json.loads(Path(config_file).read_text())
     except FileNotFoundError:
@@ -55,13 +62,11 @@ def scan_tickers_and_windows(config_file: str = "config_test.json") -> Dict[str,
 
     output_dir = cfg.get("output_directory", "output_bin/")
     now = datetime.utcnow()
-    # Strategy -> Ticker -> List of windows with source info
     strategy_windows: Dict[str, Dict[str, List[Tuple[datetime, datetime, str]]]] = {}
 
-    # Step 1: Collect windows per ticker per strategy from closed positions only
+    # Step 1: Collect windows per ticker per strategy from closed positions
     for strat in cfg.get("strategy", {}):
         strategy_windows[strat] = {}
-        # Process closed positions
         closed_file = Path(f"{output_dir}closed_positions_{strat}.json")
         if closed_file.exists():
             closed_data = json.loads(closed_file.read_text())
@@ -69,7 +74,6 @@ def scan_tickers_and_windows(config_file: str = "config_test.json") -> Dict[str,
                 for pos in positions:
                     ticker = pos["asset"]
                     start = datetime.strptime(pos["entry_time"], "%Y/%m/%d %H:%M:%S.%f")
-                    # For closed positions, always use exit_time
                     if "exit_time" in pos:
                         end = datetime.strptime(pos["exit_time"], "%Y/%m/%d %H:%M:%S.%f")
                         source = f"closed_positions_{strat} at {timestamp}"
@@ -81,37 +85,36 @@ def scan_tickers_and_windows(config_file: str = "config_test.json") -> Dict[str,
 
     # Step 2: Merge windows across strategies for each ticker
     merged_windows: Dict[str, List[Tuple[datetime, datetime]]] = {}
-    all_tickers = set()
-    for strat_data in strategy_windows.values():
-        all_tickers.update(strat_data.keys())
+    all_tickers = {t for strat_data in strategy_windows.values() for t in strat_data}
 
     for ticker in all_tickers:
-        # Gather all windows for this ticker across all strategies
+        # Gather all windows
         ticker_windows = []
-        for strat, tickers in strategy_windows.items():
-            if ticker in tickers:
-                ticker_windows.extend(tickers[ticker])
+        for strat_data in strategy_windows.values():
+            ticker_windows.extend(strat_data.get(ticker, []))
 
         if not ticker_windows:
             continue
 
-        # Sort windows by start time
+        # Sort and merge
         ticker_windows.sort(key=lambda x: x[0])
-        print(f"\nRaw windows for {ticker} before merging:")
-        for start, end, source in ticker_windows:
-            print(f"  {start} → {end} (Source: {source})")
-
-        # Merge only overlapping or exactly contiguous windows
         merged = []
-        current_start, current_end = ticker_windows[0][:2]  # Ignore source for merging
-        for start, end, source in ticker_windows[1:]:
+        current_start, current_end = ticker_windows[0][:2]
+        for start, end, _ in ticker_windows[1:]:
             if start <= current_end:
                 current_end = max(current_end, end)
             else:
                 merged.append((current_start, current_end))
                 current_start, current_end = start, end
         merged.append((current_start, current_end))
-        merged_windows[ticker] = merged
+
+        # Expand each window by ±30 minutes
+        expanded = []
+        for start, end in merged:
+            exp_start = start - timedelta(minutes=30)
+            exp_end   = end + timedelta(minutes=30)
+            expanded.append((exp_start, exp_end))
+        merged_windows[ticker] = expanded
 
     return merged_windows
 
@@ -277,7 +280,7 @@ def fetch_single_ticker_open(
             if display_ticker in combined.columns:
                 if pd.api.types.is_scalar(combined[display_ticker]):
                     combined[display_ticker] = pd.Series([combined[display_ticker]], index=combined.index[:1])
-                combined[display_ticker] = combined[display_ticker].combine_first(new_data[display_ticker], axis=0)
+                combined[display_ticker] = combined[display_ticker].combine_first(new_data[display_ticker])
             else:
                 combined[display_ticker] = new_data[display_ticker]
         except InvalidIndexError:
@@ -290,7 +293,7 @@ def fetch_single_ticker_open(
             if display_ticker in combined.columns:
                 if pd.api.types.is_scalar(combined[display_ticker]):
                     combined[display_ticker] = pd.Series([combined[display_ticker]], index=combined.index[:1])
-                combined[display_ticker] = combined[display_ticker].combine_first(new_data[display_ticker], axis=0)
+                combined[display_ticker] = combined[display_ticker].combine_first(new_data[display_ticker])
             else:
                 combined[display_ticker] = new_data[display_ticker]
     else:

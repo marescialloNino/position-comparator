@@ -490,20 +490,6 @@ class StrategyManager:
     def build_account_portfolio(self, account: str):
         output_file = f"{self.config.get('output_directory', 'output_bin/')}portfolio_{account}.json"
         
-        # Count active strategies by family
-        family_counts = {'spread': 0, 'basketspread': 0}
-        for strat_name, strat in self.strategies.items():
-            if strat.config.get('account_trade') == account and strat.config.get('active', False):
-                family = 'spread' if strat.family in ['spread', 'copula'] else 'basketspread'
-                family_counts[family] += 1
-                print(f"Counting strategy {strat_name} for account {account}: family={family}, family_counts={family_counts}")
-        
-        account_allocation = self.config.get('account_allocation', {}).get(account, {})
-        spread_weight = account_allocation.get('spread', 1.0) / max(family_counts['spread'], 1)
-        basketspread_weight = account_allocation.get('basketspread', 1.0) / max(family_counts['basketspread'], 1)
-        print(f"Spread weight for account {account}: {spread_weight}")
-        print(f"Basketspread weight for account {account}: {basketspread_weight}")
-        
         # Collect all timestamps and strategy portfolios
         all_timestamps = set()
         strategy_portfolios = {}
@@ -526,15 +512,13 @@ class StrategyManager:
         for timestamp in sorted(all_timestamps):
             # Collect all positions at this timestamp from all strategies
             aggregated_positions_qty = {}  # Number of tokens
-            aggregated_positions_qty_pctg_aum = {}  # Percentage of AUM
             
             for strat_name, portfolios in strategy_portfolios.items():
                 # Get the current portfolio state for this strategy at this timestamp
                 if timestamp in portfolios:
                     current_state = {
                         entry['asset']: {
-                            'qty': entry['qty'],
-                            'qty_pctg_aum_at_entry': entry['qty_pctg_aum_at_entry']
+                            'qty': entry['qty']
                         }
                         for entry in portfolios[timestamp]['portfolio']
                     }
@@ -543,35 +527,26 @@ class StrategyManager:
                     # If no update at this timestamp, use the last known state
                     current_state = strategy_states[strat_name]
                 
-                # Apply appropriate weight only to qty_pctg_aum_at_entry
-                weight = spread_weight if self.strategies[strat_name].family in ['spread', 'copula'] else basketspread_weight
                 for asset, data in current_state.items():
                     qty = data['qty']
-                    qty_pctg_aum = data['qty_pctg_aum_at_entry'] * weight  # Weight only the AUM percentage
                     
                     if asset in aggregated_positions_qty:
                         aggregated_positions_qty[asset] += qty
-                        aggregated_positions_qty_pctg_aum[asset] += qty_pctg_aum
                     else:
                         aggregated_positions_qty[asset] = qty
-                        aggregated_positions_qty_pctg_aum[asset] = qty_pctg_aum
             
             # Convert aggregated positions to portfolio entries, excluding near-zero quantities
             portfolio_entries = [
                 {
                     'asset': asset,
-                    'qty': qty,  # Unweighted number of tokens
-                    'qty_pctg_aum_at_entry': qty_pctg_aum  # Weighted percentage of AUM
+                    'qty': qty
                 }
                 for asset, qty in aggregated_positions_qty.items()
-                if abs(qty) > 1e-6 or abs(aggregated_positions_qty_pctg_aum[asset]) > 1e-6
+                if abs(qty) > 1e-6
             ]
-            # Calculate unbalance as the sum of qty_pctg_aum_at_entry
-            unbalance = sum(entry['qty_pctg_aum_at_entry'] for entry in portfolio_entries)
             cumulative_portfolios[timestamp] = {
                 'account': account,
-                'portfolio': portfolio_entries,
-                'portfolio_unbalance_ratio_of_aum': unbalance
+                'portfolio': portfolio_entries
             }
         
         with open(output_file, 'w') as f:
