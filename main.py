@@ -4,7 +4,7 @@ import os
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime
-from strategies import StrategyManager
+from oldcode.strategies import StrategyManager
 import sys
 from pathlib import Path
 import pandas as pd

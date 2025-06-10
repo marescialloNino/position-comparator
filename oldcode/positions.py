@@ -1,7 +1,7 @@
 # positions.py
 from typing import Dict, List
 from config import Config
-from strategies import StrategyManager, Position
+from oldcode.strategies import StrategyManager, Position
 
 class PositionCalculator:
     def __init__(self, config: Config, strategy_manager: StrategyManager):
