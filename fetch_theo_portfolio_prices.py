@@ -22,7 +22,7 @@ BOT_DATA_DIR = MODULE_DIR / "bot_data"
 TIMEFRAME = "15m"
 BAR_INTERVAL = pd.Timedelta(minutes=15)
 CONFIG_FILE = MODULE_DIR / "config_pair_session_bitget.json"
-FETCH_EXTENSION = timedelta(hours=12)  # Extend fetch windows by ±12 hours
+FETCH_EXTENSION = timedelta(hours=24)  # Extend fetch windows 
 
 # --- UTILITIES ---
 def load_config() -> Dict[str, any]:

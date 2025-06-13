@@ -1,3 +1,4 @@
+
 import asyncio
 import sys
 import os
@@ -96,7 +97,6 @@ async def fetch_bitget_positions(account: str):
     
     # Load API credentials
     load_dotenv(dotenv_path=ENV_FILE)
-    # Try both naming conventions: BITGET_2_API_KEY and BITGET_API_KEY_2
     api_key = os.getenv(f"BITGET_{account}_API_KEY") or os.getenv(f"BITGET_API_KEY_{account}")
     api_secret = os.getenv(f"BITGET_{account}_API_SECRET") or os.getenv(f"BITGET_API_SECRET_{account}")
     api_password = os.getenv("BITGET_API_PASSWORD")
@@ -120,8 +120,8 @@ async def fetch_bitget_positions(account: str):
     
     logger.info(f"Loaded API credentials for account {account}")
     
-    # Initialize Bitget market
-    market = bg.BitgetMarket(account=account)
+    # Initialize Bitget market with credentials
+    market = bg.BitgetMarket(account=account, api_key=api_key, api_secret=api_secret, api_password=api_password)
 
     try:
         logger.info(f"Fetching positions from Bitget for account {account}...")
@@ -135,7 +135,7 @@ async def fetch_bitget_positions(account: str):
                 "qty": qty,
                 "usd_value": amount,
                 "entry_price": entry_price,
-                "entry_time": entry_ts if entry_ts else current_time
+                "entry_time": entry_ts.strftime('%Y/%m/%d %H:%M:%S.%f') if entry_ts else current_time
             })
 
         # Save positions to JSON
