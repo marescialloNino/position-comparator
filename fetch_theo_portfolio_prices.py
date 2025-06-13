@@ -1,3 +1,4 @@
+
 import json
 import os
 import sys
@@ -21,6 +22,7 @@ BOT_DATA_DIR = MODULE_DIR / "bot_data"
 TIMEFRAME = "15m"
 BAR_INTERVAL = pd.Timedelta(minutes=15)
 CONFIG_FILE = MODULE_DIR / "config_pair_session_bitget.json"
+FETCH_EXTENSION = timedelta(hours=12)  # Extend fetch windows by ±12 hours
 
 # --- UTILITIES ---
 def load_config() -> Dict[str, any]:
@@ -95,21 +97,21 @@ def parse_current_state_log(strategy: str) -> Dict[str, List[Tuple[datetime, dat
                     # Parse position string
                     current_positions = {}
                     if not pos_str:
-                        continue  # Empty position list
+                        continue
                     items = pos_str.split(',')
                     for item in items:
                         item = item.strip()
                         if not item:
                             continue
-                        # Split on last colon to handle potential colons in asset names
+                        # Split on last colon
                         asset_qty = item.rsplit(':', 1)
                         if len(asset_qty) != 2:
                             print(f"Warning: Invalid asset-quantity pair in line {i+1}: {item}")
                             continue
-                        asset, qty = asset_qty
-                        asset = asset.strip("'").strip('"')
+                        asset = asset_qty[0].strip("'").strip()
+                        qty = asset_qty[1]
                         try:
-                            direction = int(float(qty.strip()))  # Expect 1 or -1
+                            direction = int(float(qty.strip()))
                             if direction not in [1, -1]:
                                 print(f"Warning: Invalid direction {direction} for {asset} in line {i+1}")
                                 continue
@@ -259,20 +261,21 @@ def save_unavailable_ticker(ticker: str, reason: str, exchange: str) -> None:
 # --- FETCH PER TICKER ---
 def fetch_single_ticker(ticker: str, windows: List[Tuple[datetime, datetime]], exchange: str = "bitget") -> None:
     """
-    Fetch 15-minute open prices for a ticker within the specified windows from the given exchange.
+    Fetch 15-minute open prices for a ticker within the specified windows from the given exchange,
+    extended by ±12 hours to ensure coverage, and save the full extended data.
     """
     if exchange.lower() == "binance":
         market = bf.BinanceFutureMarket()
     elif exchange.lower() == "bitget":
         market = bitget_df.BitgetMarket()
-    elif exchange.lower() == "okex":
+    elif exchange.lower() == "okx":
         market = okex_df.OkexMarket()
     else:
         raise ValueError(f"Unsupported exchange: {exchange}")
     
     paths = get_exchange_paths(exchange)
     cov = load_coverage(exchange)
-    existing_coverage = [(datetime.fromisoformat(s), datetime.fromisoformat(e)) for s, e in cov.get(ticker, [])]
+    existing_coverage = [(pd.Timestamp(s), pd.Timestamp(e)) for s, e in cov.get(ticker, [])]
     updated = existing_coverage.copy()
     outpath = paths["exchange_dir"] / f"{ticker}_open.csv"
     
@@ -284,33 +287,29 @@ def fetch_single_ticker(ticker: str, windows: List[Tuple[datetime, datetime]], e
     if outpath.exists():
         df_existing = pd.read_csv(outpath, parse_dates=['timestamp']).set_index('timestamp')
         df_existing.index = pd.to_datetime(df_existing.index, utc=True).tz_localize(None)
-        df_existing = df_existing[~df_existing.index.duplicated(keep='first')]
-        mask = pd.Series(False, index=df_existing.index)
-        for start, end in windows:
-            window_mask = (df_existing.index >= start) & (df_existing.index <= end)
-            mask |= window_mask
-        df_existing = df_existing[mask]
-        if df_existing.empty:
-            df_existing = pd.DataFrame()
+        df_existing = df_existing[~df_existing.index.duplicated()]
     else:
         df_existing = pd.DataFrame()
     
     parts = []
     try:
         for start, end in windows:
-            if any(cov_start <= start and cov_end >= end for cov_start, cov_end in existing_coverage):
-                print(f"[SKIP] {ticker} window {start}–{end} on {exchange}: already covered")
+            # Extend fetch window by ±12 hours
+            fetch_start = start - FETCH_EXTENSION
+            fetch_end = end + FETCH_EXTENSION
+            print(f"Processing {ticker} window {start}–{end}, fetching {fetch_start}–{fetch_end} (±12 hours) on {exchange}")
+            
+            # Check coverage for the extended window
+            if any(cov_start <= fetch_start and cov_end >= fetch_end for cov_start, cov_end in existing_coverage):
+                print(f"[SKIP] {ticker} extended window {fetch_start}–{fetch_end} on {exchange}: already covered")
                 continue
             
-            fetch_start = start
-            fetch_end = end
+            # Adjust for partial coverage
             for cov_start, cov_end in existing_coverage:
-                if start >= cov_start and start <= cov_end:
+                if fetch_start >= cov_start and fetch_start <= cov_end:
                     fetch_start = cov_end
-                if end >= cov_start and end <= cov_end:
+                if fetch_end >= cov_start and fetch_end <= cov_end:
                     fetch_end = cov_start
-                if start < cov_start and end > cov_end:
-                    fetch_start = cov_end
             
             if fetch_start >= fetch_end:
                 print(f"[SKIP] {ticker} window {start}–{end} on {exchange}: adjusted window {fetch_start}–{fetch_end} is invalid")
@@ -331,6 +330,7 @@ def fetch_single_ticker(ticker: str, windows: List[Tuple[datetime, datetime]], e
             idx = pd.to_datetime(bars.index, unit='s', utc=True).tz_localize(None)
             series = pd.Series(bars['open'].values, index=idx, name=ticker)
             series = series[~series.index.duplicated(keep='first')]
+            print(f"Fetched {len(series)} bars for {ticker} from {series.index.min()} to {series.index.max()}")
             parts.append(series)
             updated.append((fetch_start, fetch_end))
     except Exception as e:
@@ -353,6 +353,7 @@ def fetch_single_ticker(ticker: str, windows: List[Tuple[datetime, datetime]], e
     new_data = pd.concat(parts, axis=0).to_frame().sort_index()
     new_data.columns = [ticker]
     new_data = new_data[~new_data.index.duplicated(keep='first')]
+    print(f"Combined new data for {ticker}: {len(new_data)} bars from {new_data.index.min()} to {new_data.index.max()}")
     
     if not df_existing.empty:
         try:
@@ -372,18 +373,13 @@ def fetch_single_ticker(ticker: str, windows: List[Tuple[datetime, datetime]], e
     else:
         combined = new_data.copy()
     
-    mask = pd.Series(False, index=combined.index)
-    for start, end in windows:
-        window_mask = (combined.index >= start) & (combined.index <= end)
-        mask |= window_mask
-    combined = combined[mask]
-    
+    # Save all data (no filtering to original windows)
     if combined.empty:
-        print(f"No data within the requested windows for {ticker} on {exchange}")
+        print(f"No data fetched for {ticker} on {exchange}")
         return
     
     combined.to_csv(outpath, index_label='timestamp')
-    print(f"Saved/Updated {ticker} → {outpath} for {exchange}")
+    print(f"Saved/Updated {ticker} → {outpath} with {len(combined)} bars from {combined.index.min()} to {combined.index.max()}")
     
     # Update coverage
     updated.sort(key=lambda x: x[0])

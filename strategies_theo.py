@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+"""
+strategies.py
+~~~~~~~~~~~~~
+Manages trading strategies and aggregates account-level portfolios.
+Handles current_state.log parsing and portfolio snapshot generation.
+"""
+
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 import json
@@ -6,6 +14,8 @@ import re
 from datetime import datetime, timedelta
 import pandas as pd
 from pathlib import Path
+
+from config_manager import ConfigManager
 
 MODULE_DIR = Path(__file__).resolve().parent
 BOT_DATA_DIR = MODULE_DIR / "bot_data"
@@ -22,11 +32,13 @@ class PortfolioEntry:
     unrealized_pnl: float  # current_value - usd_value_at_entry
 
 class Strategy:
-    def __init__(self, name: str, family: str, strategy_config: Dict, global_config: Dict):
+    def __init__(self, name: str, family: str, config_manager: ConfigManager):
         self.name = name
         self.family = family
-        self.config = strategy_config
-        self.global_config = global_config
+        self.config_manager = config_manager
+        self.config = config_manager.get_strategy_config(name)
+        if not self.config:
+            raise ValueError(f"No config found for strategy {name}")
         print(f"Initializing strategy {name} with config: {self.config}")
         self.portfolio: Dict[str, Dict] = {}  # asset -> {qty, entry_price, entry_time, usd_value_at_entry}
         self.first_timestamp: str = None
@@ -34,35 +46,11 @@ class Strategy:
         self.portfolio_snapshots: Dict[str, Dict] = {}  # Store snapshots for aggregation
 
     def get_aum_and_max_positions(self) -> tuple[float, int]:
-        """Calculate strategy AUM and maximum number of positions, splitting AUM among active basketspread strategies."""
+        """Calculate strategy AUM and maximum number of positions."""
         account = self.config.get('account_trade')
         exchange = self.config.get('exchange_trade', 'bitget')
-        allocations = self.global_config.get('allocations', {}).get(exchange, {}).get(account, {})
-        allocation = allocations.get('amount', 0.0)
-        leverage = allocations.get('leverage', 1.0)
-        allocation_ratio = allocations.get('allocation_ratios', {}).get(self.config.get('type'), 0.0)
-        base_aum = allocation * leverage * allocation_ratio
-
-        # Count active basketspread strategies for the same account and exchange
-        active_basket_strats = sum(
-            1 for strat_config in self.global_config.get('strategy', {}).values()
-            if strat_config.get('active', False) and
-            strat_config.get('type') == 'basketspread' and
-            strat_config.get('account_trade') == account and
-            strat_config.get('exchange_trade', 'bitget') == exchange
-        )
-        if active_basket_strats > 0 and self.family == 'basketspread':
-            aum = base_aum / active_basket_strats
-        else:
-            aum = base_aum
-
-        if self.family == 'basketspread':
-            nb_long = int(self.config.get('nb_long', 8))
-            nb_short = int(self.config.get('nb_short', 8))
-            max_positions = nb_long + nb_short
-        else:
-            max_positions = int(self.config.get('max_total_expo', 16)) * 2  # For pair strategies
-
+        aum, max_positions = self.config_manager.get_aum_and_max_positions(self.name, account, exchange)
+        print(f"Strategy {self.name}: AUM={aum}, Max Positions={max_positions}")
         return aum, max_positions
 
     def get_price_at_time(self, price_matrix: pd.DataFrame, asset: str, time: datetime) -> Optional[float]:
@@ -72,10 +60,14 @@ class Strategy:
             return None
         deltas = abs(price_matrix.index - time)
         idx = deltas.argmin()
-        if deltas[idx] <= timedelta(minutes=30):  # Allow 30-minute tolerance
+        if deltas[idx] <= timedelta(minutes=120):  # Increased tolerance to 120 minutes
             price = float(price_matrix.iloc[idx][asset])
-            return price if not pd.isna(price) else None
-        print(f"Warning: No price within 30 minutes of {time} for {asset} in strategy {self.name}")
+            if pd.isna(price):
+                print(f"Warning: NaN price for {asset} at {time} in strategy {self.name}")
+                return None
+            print(f"Price for {asset} at {time}: {price}")
+            return price
+        print(f"Warning: No price within 120 minutes of {time} for {asset} in strategy {self.name}")
         return None
 
     def process_current_state_log(self, price_matrix: pd.DataFrame, output_file: str, closed_file: str):
@@ -91,6 +83,7 @@ class Strategy:
             print(f"Warning: Invalid AUM ({aum}) or max positions ({max_positions}) for strategy {self.name}")
             return
         notional_per_position = aum / max_positions  # Absolute value per position
+        print(f"Strategy {self.name}: Notional per position={notional_per_position}")
 
         # Parse the log file
         timestamps = []
@@ -104,15 +97,21 @@ class Strategy:
         with open(file_path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f):
                 line = line.strip()
-                if not line:
-                    continue
+                if not line or line == "ts;positions":
+                    continue  # Skip empty lines or header
+                
                 try:
-                    # Extract timestamp using regex
-                    timestamp_match = timestamp_pattern.match(line)
+                    # Split on semicolon to separate timestamp and positions
+                    parts = line.split(';', 1)
+                    if len(parts) != 2:
+                        raise ValueError(f"Invalid line format, expected 'ts;positions' in line {i+1}")
+                    timestamp_str, pos_str = parts
+                    
+                    # Validate timestamp using regex
+                    timestamp_match = timestamp_pattern.match(timestamp_str)
                     if not timestamp_match:
-                        raise ValueError(f"Invalid timestamp format in line {i+1}")
+                        raise ValueError(f"Invalid timestamp format in line {i+1}: {timestamp_str}")
                     timestamp_str = timestamp_match.group(1)
-                    pos_str = line[len(timestamp_match.group(0)):].lstrip(':').strip()
                     
                     # Parse timestamp
                     timestamp = None
@@ -126,8 +125,9 @@ class Strategy:
                         raise ValueError(f"Cannot parse timestamp: {timestamp_str}")
                     
                     # Parse position string
-                    positions = {}
+                    positions = []
                     if not pos_str:
+                        print(f"Warning: Empty position string at line {i+1} in {file_path}")
                         continue
                     items = pos_str.split(',')
                     for item in items:
@@ -145,12 +145,16 @@ class Strategy:
                             if direction not in [1, -1]:
                                 print(f"Warning: Invalid direction {direction} for {asset} in {file_path}")
                                 continue
-                            positions[asset] = direction
+                            positions.append((asset, direction))
                         except ValueError:
                             print(f"Warning: Invalid quantity in line {i+1}: {direction}")
                             continue
-                    timestamps.append(timestamp)
-                    portfolio_states[timestamp] = positions
+                    if positions:
+                        timestamps.append(timestamp)
+                        portfolio_states[timestamp] = positions
+                        print(f"Strategy {self.name}: Parsed {len(positions)} positions at {timestamp}")
+                    else:
+                        print(f"Warning: No valid positions parsed at line {i+1} in {file_path}")
                 except Exception as e:
                     print(f"Warning: Failed to parse line in {file_path}: {line}. Error: {e}")
                     continue
@@ -159,17 +163,22 @@ class Strategy:
             print(f"Warning: No valid entries found in {file_path} for strategy {self.name}")
             return
 
+        print(f"Strategy {self.name}: Parsed {len(timestamps)} timestamps")
         timestamps.sort()
-        current_positions = {}  # {asset: {'qty': float, 'entry_time': datetime, 'entry_price': float, 'usd_value_at_entry': float}}
+        current_positions = {}  # {asset: {'qty': float, 'entry_time': datetime, 'entry_price': float, 'usd_value_at_entry'}}
         self.portfolio_snapshots = {}
 
         for i, ts in enumerate(timestamps):
-            prev_state = portfolio_states[timestamps[i-1]] if i > 0 else {}
+            prev_state = portfolio_states[timestamps[i-1]] if i > 0 else []
             current_state = portfolio_states[ts]
+
+            # Convert prev_state and current_state to dict for comparison
+            prev_positions = {asset: direction for asset, direction in prev_state}
+            current_positions_dict = {asset: direction for asset, direction in current_state}
 
             # Detect closed positions
             for asset in list(current_positions.keys()):
-                if asset not in current_state:
+                if asset not in current_positions_dict:
                     pos = current_positions[asset]
                     exit_time = ts
                     exit_price = self.get_price_at_time(price_matrix, asset, exit_time)
@@ -192,7 +201,7 @@ class Strategy:
                     del current_positions[asset]
 
             # Update current positions with new positions
-            for asset, direction in current_state.items():
+            for asset, direction in current_state:
                 if asset not in current_positions:
                     entry_time = ts
                     entry_price = self.get_price_at_time(price_matrix, asset, entry_time)
@@ -205,6 +214,8 @@ class Strategy:
                             'entry_price': entry_price,
                             'usd_value_at_entry': usd_value_at_entry
                         }
+                    else:
+                        print(f"Warning: Skipping position for {asset} at {ts} due to invalid entry price")
 
             # Record portfolio snapshot
             snapshot = []
@@ -212,7 +223,8 @@ class Strategy:
             for asset, pos in current_positions.items():
                 current_price = self.get_price_at_time(price_matrix, asset, ts)
                 if current_price is None:
-                    continue  # Skip if no price available
+                    print(f"Warning: Skipping snapshot for {asset} at {ts} due to missing current price")
+                    continue
                 current_value = pos['qty'] * current_price
                 unrealized_pnl = current_value - pos['usd_value_at_entry']
                 total_unrealized_pnl += unrealized_pnl
@@ -227,11 +239,13 @@ class Strategy:
                     'unrealized_pnl': unrealized_pnl
                 })
             
-            self.portfolio_snapshots[ts.strftime('%Y/%m/%d %H:%M:%S.%f')] = {
-                'strategy': self.name,
-                'portfolio': snapshot,
-                'portfolio_unbalance_usd': total_unrealized_pnl
-            }
+            if snapshot:
+                self.portfolio_snapshots[ts.strftime('%Y/%m/%d %H:%M:%S.%f')] = {
+                    'strategy': self.name,
+                    'portfolio': snapshot,
+                    'portfolio_unbalance_usd': total_unrealized_pnl
+                }
+                print(f"Strategy {self.name}: Added snapshot at {ts} with {len(snapshot)} positions")
 
         # Record remaining open positions at the last timestamp
         if current_positions and timestamps:
@@ -248,6 +262,10 @@ class Strategy:
                 }
                 self.closed_positions[last_ts].append(entry)
 
+        print(f"Strategy {self.name}: Generated {len(self.portfolio_snapshots)} snapshots")
+        if not self.portfolio_snapshots:
+            print(f"Warning: No snapshots generated for strategy {self.name}")
+
         # Write output files
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
         with open(output_file, 'w') as f:
@@ -257,17 +275,12 @@ class Strategy:
         print(f"Generated {output_file} and {closed_file} for strategy {self.name}")
 
 class StrategyManager:
-    def __init__(self, config_file: str = 'config_test.json'):
+    def __init__(self, config_file: str = 'config_pair_session_bitget.json'):
+        self.config_manager = ConfigManager(config_file)
         self.strategies: Dict[str, Strategy] = {}
-        try:
-            with open(config_file, 'r') as f:
-                self.config = json.load(f)
-        except FileNotFoundError:
-            print(f"Error: Config file {config_file} not found. Using empty config.")
-            self.config = {'strategy': {}, 'allocations': {}}
 
-    def add_strategy(self, name: str, family: str, strategy_config: Dict):
-        self.strategies[name] = Strategy(name, family, strategy_config, self.config)
+    def add_strategy(self, name: str, family: str):
+        self.strategies[name] = Strategy(name, family, self.config_manager)
 
     def load_price_matrix(self, exchange: str) -> pd.DataFrame:
         """Load the price matrix for a given exchange."""
@@ -280,32 +293,57 @@ class StrategyManager:
 
     def aggregate_account_portfolio(self, account: str, exchange: str, price_matrix: pd.DataFrame, output_dir: str):
         """Aggregate positions across all strategies in the same account."""
-        # Collect all timestamps and positions
+        # Collect all timestamps and relevant strategies
         all_timestamps = set()
+        relevant_strategies = []
         for strat in self.strategies.values():
-            if (strat.config.get('active', False) and
-                strat.config.get('account_trade') == account and
+            print(f"Checking strategy {strat.name}: active={strat.config.get('active', True)}, "
+                  f"account={strat.config.get('account_trade')}, exchange={strat.config.get('exchange_trade')}, "
+                  f"snapshots={len(strat.portfolio_snapshots)}")
+            if (strat.config.get('active', True) and
+                str(strat.config.get('account_trade')) == str(account) and
                 strat.config.get('exchange_trade', 'bitget') == exchange):
-                all_timestamps.update(
-                    datetime.strptime(ts, '%Y/%m/%d %H:%M:%S.%f')
-                    for ts in strat.portfolio_snapshots.keys()
-                )
+                if not strat.portfolio_snapshots:
+                    print(f"Warning: No portfolio snapshots for strategy {strat.name}")
+                    continue
+                relevant_strategies.append(strat)
+                try:
+                    timestamps = {
+                        datetime.strptime(ts, '%Y/%m/%d %H:%M:%S.%f')
+                        for ts in strat.portfolio_snapshots.keys()
+                    }
+                    all_timestamps.update(timestamps)
+                    print(f"Found {len(timestamps)} snapshots for strategy {strat.name}")
+                except ValueError as e:
+                    print(f"Error parsing timestamps for strategy {strat.name}: {e}")
+                    continue
+            else:
+                print(f"Strategy {strat.name} excluded: "
+                      f"active={strat.config.get('active', True)}, "
+                      f"account={strat.config.get('account_trade')} vs {account}, "
+                      f"exchange={strat.config.get('exchange_trade')} vs {exchange}")
         
-        if not all_timestamps:
-            print(f"No portfolio snapshots found for account {account} on exchange {exchange}")
+        if not all_timestamps or not relevant_strategies:
+            print(f"No portfolio snapshots found for account {account} on exchange {exchange}. "
+                  f"Relevant strategies: {len(relevant_strategies)}, Timestamps: {len(all_timestamps)}")
             return
 
         # Aggregate positions at each timestamp
         account_portfolio = {}
         for ts in sorted(all_timestamps):
-            positions = {}
-            for strat in self.strategies.values():
-                if not (strat.config.get('active', False) and
-                        strat.config.get('account_trade') == account and
-                        strat.config.get('exchange_trade', 'bitget') == exchange):
+            positions = {}  # {asset: quantity}
+            # Track the most recent snapshot for each strategy
+            for strat in relevant_strategies:
+                # Find the most recent snapshot at or before ts
+                strat_timestamps = sorted(
+                    datetime.strptime(ts_str, '%Y/%m/%d %H:%M:%S.%f')
+                    for ts_str in strat.portfolio_snapshots.keys()
+                    if datetime.strptime(ts_str, '%Y/%m/%d %H:%M:%S.%f') <= ts
+                )
+                if not strat_timestamps:
                     continue
-                ts_str = ts.strftime('%Y/%m/%d %H:%M:%S.%f')
-                snapshot = strat.portfolio_snapshots.get(ts_str, {}).get('portfolio', [])
+                latest_ts = strat_timestamps[-1].strftime('%Y/%m/%d %H:%M:%S.%f')
+                snapshot = strat.portfolio_snapshots.get(latest_ts, {}).get('portfolio', [])
                 for pos in snapshot:
                     asset = pos['asset']
                     qty = pos['qty']
@@ -314,9 +352,10 @@ class StrategyManager:
             # Build portfolio entry
             portfolio_entry = []
             for asset, quantity in positions.items():
-                if abs(quantity) < 1e-8:  # Skip zero quantities
+                if abs(quantity) < 1e-8:  # Skip near-zero quantities
                     continue
-                current_price = strat.get_price_at_time(price_matrix, asset, ts)
+                # Use Strategy.get_price_at_time for consistent price lookup
+                current_price = relevant_strategies[0].get_price_at_time(price_matrix, asset, ts)
                 if current_price is None:
                     print(f"Warning: No price for {asset} at {ts} for account {account}")
                     continue
@@ -331,6 +370,10 @@ class StrategyManager:
             if portfolio_entry:
                 account_portfolio[ts.strftime('%Y/%m/%d %H:%M:%S.%f')] = portfolio_entry
 
+        if not account_portfolio:
+            print(f"No aggregated portfolio entries generated for account {account} on exchange {exchange}")
+            return
+
         # Write output file
         output_file = os.path.join(output_dir, f"account_{account}_portfolio.json")
         os.makedirs(output_dir, exist_ok=True)
@@ -342,9 +385,8 @@ class StrategyManager:
         """Process current_state.log for all active strategies and aggregate account portfolios."""
         print("Processing current_state.log for all strategies:")
         exchanges = set(
-            strat_config.get('exchange_trade', 'bitget')
-            for strat_config in self.config.get('strategy', {}).values()
-            if strat_config.get('active', False)
+            strat.get('exchange_trade', 'bitget')
+            for strat in self.config_manager.get_active_strategies()
         )
         price_matrices = {}
         for exchange in exchanges:
@@ -355,12 +397,14 @@ class StrategyManager:
                 continue
 
         accounts = set()
-        output_dir = self.config.get('output_directory', 'output_bitget')
-        for strat_name, strat in self.strategies.items():
-            if not strat.config.get('active', False):
-                continue
-            exchange = strat.config.get('exchange_trade', 'bitget')
-            account = strat.config.get('account_trade')
+        output_dir = self.config_manager.get_output_directory()
+        for strat in self.config_manager.get_active_strategies():
+            strat_name = strat['name']
+            exchange = strat.get('exchange_trade', 'bitget')
+            account = strat.get('account_trade')
+            family = strat.get('type', 'basketspread')
+            if strat_name not in self.strategies:
+                self.add_strategy(strat_name, family)
             accounts.add((account, exchange))
             price_matrix = price_matrices.get(exchange)
             if price_matrix is None:
@@ -369,7 +413,7 @@ class StrategyManager:
             output_file = f"{output_dir}/portfolio_{strat_name}.json"
             closed_file = f"{output_dir}/closed_positions_{strat_name}.json"
             print(f"Processing strategy: {strat_name}")
-            strat.process_current_state_log(price_matrix, output_file, closed_file)
+            self.strategies[strat_name].process_current_state_log(price_matrix, output_file, closed_file)
 
         # Aggregate portfolios for each account
         for account, exchange in accounts:
@@ -380,10 +424,9 @@ class StrategyManager:
             self.aggregate_account_portfolio(account, exchange, price_matrix, output_dir)
 
 if __name__ == "__main__":
-    config_file = "config_pair_session_bitget.json"
-    manager = StrategyManager(config_file)
-    for strat_name, strat_config in manager.config.get('strategy', {}).items():
-        if strat_config.get('active', False):
-            family = strat_config.get('type', 'basketspread')
-            manager.add_strategy(strat_name, family, strat_config)
+    manager = StrategyManager()
+    for strat in manager.config_manager.get_active_strategies():
+        strat_name = strat['name']
+        family = strat.get('type', 'basketspread')
+        manager.add_strategy(strat_name, family)
     manager.process_all_current_state_logs()

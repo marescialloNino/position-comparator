@@ -2,7 +2,7 @@
 """
 calculate_theoretical_pnl.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Computes portfolio realized PnL, total PnL, and return percentage for each strategy
+Computes portfolio realized PnL, unrealized PnL, total PnL, and return percentage for each strategy
 and account based on portfolio_*.json and closed_positions_*.json from strategies.py.
 Writes pnl_timeline_{strategy}.json and pnl_timeline_account_{account}.json in output_bitget/.
 Missing prices are null in JSON.
@@ -60,7 +60,27 @@ def sanitize(obj: Any) -> Any:
         return None
     return obj
 
-def get_aum(strat_config: Dict, global_config: Dict, account: str, exchange: str, strategy_type: str) -> float:
+def get_price_at_time(price_matrix: pd.DataFrame, asset: str, time: datetime) -> Optional[float]:
+    """Fetch the price of an asset at a given time from the price matrix."""
+    if not isinstance(time, datetime):
+        print(f"Warning: Time {time} is not a datetime object")
+        return None
+    if asset not in price_matrix.columns:
+        print(f"Warning: Asset {asset} not found in price matrix")
+        return None
+    deltas = abs(price_matrix.index - time)
+    idx = deltas.argmin()
+    if deltas[idx] <= timedelta(minutes=120):
+        price = float(price_matrix.iloc[idx][asset])
+        if pd.isna(price):
+            print(f"Warning: NaN price for {asset} at {time}")
+            return None
+        print(f"Price for {asset} at {time}: {price}")
+        return price
+    print(f"Warning: No price within 120 minutes of {time} for {asset}")
+    return None
+
+def get_strategy_aum(strat_config: Dict, global_config: Dict, account: str, exchange: str, strategy_type: str) -> float:
     """Calculate strategy AUM, splitting among active basketspread strategies."""
     allocations = global_config.get('allocations', {}).get(exchange, {}).get(account, {})
     allocation = allocations.get('amount', 0.0)
@@ -80,6 +100,13 @@ def get_aum(strat_config: Dict, global_config: Dict, account: str, exchange: str
             return base_aum / active_basket_strats
     return base_aum
 
+def get_account_aum(global_config: Dict, account: str, exchange: str) -> float:
+    """Calculate total account AUM."""
+    allocations = global_config.get('allocations', {}).get(exchange, {}).get(account, {})
+    allocation = allocations.get('amount', 0.0)
+    leverage = allocations.get('leverage', 1.0)
+    return allocation * leverage
+
 # --- LOAD PORTFOLIO DATA ---
 def load_portfolios() -> Dict[str, Dict[str, Any]]:
     """Load portfolio snapshots from portfolio_*.json files."""
@@ -89,6 +116,7 @@ def load_portfolios() -> Dict[str, Dict[str, Any]]:
 
     for strat in cfg["strategy"]:
         if not cfg["strategy"][strat].get("active", False):
+            print(f"Strategy {strat} is not active, skipping")
             continue
         file_path = paths["output_dir"] / PORTFOLIO_PATTERN.format(strategy=strat)
         if not file_path.exists():
@@ -99,10 +127,13 @@ def load_portfolios() -> Dict[str, Dict[str, Any]]:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 portfolios[strat] = data
+                print(f"Loaded portfolio for strategy {strat} with {len(data)} snapshots")
         except Exception as e:
             print(f"Error reading {file_path}: {e}")
             continue
     
+    if not portfolios:
+        print("Error: No portfolios loaded for any strategy")
     return portfolios
 
 def load_closed_positions() -> Dict[str, List[Tuple[datetime, float]]]:
@@ -127,10 +158,12 @@ def load_closed_positions() -> Dict[str, List[Tuple[datetime, float]]]:
                                 dt = datetime.strptime(exit_ts, "%Y/%m/%d %H:%M:%S.%f")
                                 entries.append((dt, pnl))
                             except Exception:
+                                print(f"Warning: Invalid timestamp {exit_ts} in {path}")
                                 continue
             except Exception as e:
                 print(f"Warning: Failed to parse closed positions from {path}: {e}")
         closed_map[strat] = sorted(entries, key=lambda x: x[0])
+        print(f"Loaded {len(entries)} closed positions for strategy {strat}")
     return closed_map
 
 # --- COMPUTE PNL ---
@@ -142,13 +175,30 @@ def compute_pnl_timeline(
     """Compute PnL timeline for each strategy and account."""
     cfg = load_config()
     closed_map = load_closed_positions()
+    price_matrix = load_price_matrix()
     timeline: Dict[str, Any] = {}
     
+    # Collect all timestamps across strategies
+    all_timestamps = set()
+    for strategy, snaps in portfolios.items():
+        if (cfg["strategy"].get(strategy, {}).get("account_trade") == account and
+            cfg["strategy"].get(strategy, {}).get("exchange_trade", "bitget") == exchange and
+            cfg["strategy"].get(strategy, {}).get("active", False)):
+            all_timestamps.update(snaps.keys())
+    print(f"Found {len(all_timestamps)} unique timestamps for account {account}")
+
+    if not all_timestamps:
+        print(f"Error: No timestamps found for account {account} on {exchange}")
+        return timeline
+
     # Strategy-level timelines
     for strategy, snaps in portfolios.items():
         strat_cfg = cfg["strategy"].get(strategy, {})
+        if not strat_cfg.get("active", False):
+            print(f"Strategy {strategy} is not active, skipping")
+            continue
         strategy_type = strat_cfg.get('type', 'basketspread')
-        aum = get_aum(strat_cfg, cfg, account, exchange, strategy_type)
+        aum = get_strategy_aum(strat_cfg, cfg, account, exchange, strategy_type)
         if aum <= 0:
             print(f"Warning: Invalid AUM ({aum}) for strategy {strategy}")
             continue
@@ -158,16 +208,75 @@ def compute_pnl_timeline(
         idx_real = 0
         n_real = len(realized_list)
         
+        # Sort strategy timestamps
+        strat_timestamps = sorted(
+            datetime.strptime(ts, "%Y/%m/%d %H:%M:%S.%f") for ts in snaps.keys()
+        )
         strategy_timeline = {}
-        for ts_str, snap in sorted(snaps.items()):
+        last_positions = []
+        
+        for ts_str in sorted(all_timestamps):
             entry_time = datetime.strptime(ts_str, "%Y/%m/%d %H:%M:%S.%f")
+            
+            # Update realized PnL
             while idx_real < n_real and realized_list[idx_real][0] <= entry_time:
                 run_realized += realized_list[idx_real][1]
                 idx_real += 1
             
-            positions = snap.get("portfolio", [])
-            total_unreal = sum(pos.get("unrealized_pnl", 0.0) for pos in positions if pos.get("unrealized_pnl") is not None)
-            has_missing_price = any(pos.get("current_price") is None for pos in positions)
+            # Find the most recent snapshot at or before entry_time
+            recent_ts = max(
+                (t for t in strat_timestamps if t <= entry_time),
+                default=None
+            )
+            if recent_ts is None:
+                positions = []
+                print(f"Strategy {strategy}: No prior snapshot for {ts_str}, using empty positions")
+            else:
+                recent_ts_str = recent_ts.strftime("%Y/%m/%d %H:%M:%S.%f")
+                positions = snaps.get(recent_ts_str, {}).get("portfolio", [])
+                if positions != last_positions:
+                    print(f"Strategy {strategy}: Using {len(positions)} positions from {recent_ts_str} for {ts_str}")
+                last_positions = positions
+            
+            # Recalculate unrealized PnL for positions
+            updated_positions = []
+            total_unreal = 0.0
+            has_missing_price = False
+            for pos in positions:
+                asset = pos["asset"]
+                qty = pos["qty"]
+                entry_price = pos["entry_price"]
+                entry_time_str = pos["entry_time"]
+                usd_value_at_entry = pos["usd_value_at_entry"]
+                
+                # Parse entry_time to datetime
+                try:
+                    pos_time = datetime.strptime(entry_time_str, "%Y/%m/%d %H:%M:%S.%f")
+                except ValueError as e:
+                    print(f"Warning: Invalid entry_time {entry_time_str} for {asset} in {strategy}: {e}")
+                    has_missing_price = True
+                    current_price = None
+                    current_value = None
+                    unreal_pnl = None
+                else:
+                    current_price = get_price_at_time(price_matrix, asset, entry_time)
+                    if current_price is None:
+                        has_missing_price = True
+                    current_value = qty * current_price if current_price is not None else None
+                    unreal_pnl = (current_value - usd_value_at_entry) if current_value is not None else None
+                    if unreal_pnl is not None:
+                        total_unreal += unreal_pnl
+                
+                updated_positions.append({
+                    "asset": asset,
+                    "qty": qty,
+                    "entry_price": entry_price,
+                    "entry_time": entry_time_str,
+                    "usd_value_at_entry": usd_value_at_entry,
+                    "current_price": current_price,
+                    "current_value": current_value,
+                    "unrealized_pnl": unreal_pnl
+                })
             
             portfolio_realized = run_realized
             portfolio_unrealized = total_unreal if not has_missing_price else None
@@ -175,7 +284,7 @@ def compute_pnl_timeline(
             portfolio_return_pct = portfolio_total / aum if aum > 0 and portfolio_total is not None else None
             
             strategy_timeline[ts_str] = {
-                "positions": positions,  # Reuse portfolio_*.json positions
+                "positions": updated_positions,
                 "portfolio_realized_pnl": portfolio_realized,
                 "portfolio_unrealized_pnl": portfolio_unrealized,
                 "portfolio_total_pnl": portfolio_total,
@@ -183,28 +292,20 @@ def compute_pnl_timeline(
             }
         
         timeline[strategy] = strategy_timeline
+        print(f"Computed timeline for strategy {strategy} with {len(strategy_timeline)} entries")
     
     # Account-level timeline
+    account_aum = get_account_aum(cfg, account, exchange)
+    print(f"Account {account} AUM: {account_aum}")
+    if account_aum <= 0:
+        print(f"Warning: Invalid account AUM ({account_aum}) for account {account}")
+    
     account_timeline = {}
-    all_timestamps = set()
-    for strategy, snaps in portfolios.items():
-        if (cfg["strategy"].get(strategy, {}).get("account_trade") == account and
-            cfg["strategy"].get(strategy, {}).get("exchange_trade", "bitget") == exchange):
-            all_timestamps.update(snaps.keys())
-    
-    price_matrix = load_price_matrix()
-    account_aum = sum(
-        get_aum(cfg["strategy"][strat], cfg, account, exchange, cfg["strategy"][strat].get('type', 'basketspread'))
-        for strat in cfg["strategy"]
-        if cfg["strategy"][strat].get('active', False) and
-        cfg["strategy"][strat].get('account_trade') == account and
-        cfg["strategy"][strat].get('exchange_trade', 'bitget') == exchange
-    )
-    
     for ts_str in sorted(all_timestamps):
         entry_time = datetime.strptime(ts_str, "%Y/%m/%d %H:%M:%S.%f")
-        positions = {}
-        run_realized = 0.0
+        total_realized = 0.0
+        total_unrealized = 0.0
+        has_missing_price = False
         
         for strategy, snaps in portfolios.items():
             strat_cfg = cfg["strategy"].get(strategy, {})
@@ -212,64 +313,24 @@ def compute_pnl_timeline(
                 strat_cfg.get("exchange_trade", "bitget") != exchange or
                 not strat_cfg.get("active", False)):
                 continue
-            snap = snaps.get(ts_str, {}).get("portfolio", [])
-            for pos in snap:
-                asset = pos["asset"]
-                qty = pos["qty"]
-                positions[asset] = positions.get(asset, 0.0) + qty
             
-            # Accumulate realized PnL
-            realized_list = closed_map.get(strategy, [])
-            for dt, pnl in realized_list:
-                if dt <= entry_time:
-                    run_realized += pnl
-        
-        # Compute account-level metrics
-        account_positions = []
-        total_unreal = 0.0
-        has_missing_price = False
-        for asset, qty in positions.items():
-            if abs(qty) < 1e-8:
-                continue
-            current_price = None
-            if asset in price_matrix.columns:
-                deltas = abs(price_matrix.index - entry_time)
-                idx = deltas.argmin()
-                if deltas[idx] <= timedelta(minutes=30):
-                    current_price = float(price_matrix.iloc[idx][asset])
-                    if pd.isna(current_price):
-                        current_price = None
-            
-            current_value = current_price * qty if current_price is not None else None
-            unreal_pnl = None
-            for strategy, snaps in portfolios.items():
-                snap = snaps.get(ts_str, {}).get("portfolio", [])
-                for pos in snap:
-                    if pos["asset"] == asset:
-                        entry_price = pos["entry_price"]
-                        if current_price is not None and entry_price is not None:
-                            unreal_pnl = (current_value - qty * entry_price) if unreal_pnl is None else unreal_pnl + (current_value - qty * entry_price)
-            
-            if current_price is None:
+            # Use strategy timeline entry
+            strategy_entry = timeline.get(strategy, {}).get(ts_str, {})
+            realized = strategy_entry.get("portfolio_realized_pnl", 0.0)
+            unrealized = strategy_entry.get("portfolio_unrealized_pnl")
+            if realized is not None:
+                total_realized += realized
+            if unrealized is not None:
+                total_unrealized += unrealized
+            else:
                 has_missing_price = True
-            
-            account_positions.append({
-                "asset": asset,
-                "qty": qty,
-                "current_price": current_price,
-                "current_value": current_value,
-                "unrealized_pnl": unreal_pnl
-            })
-            if unreal_pnl is not None:
-                total_unreal += unreal_pnl
         
-        portfolio_realized = run_realized
-        portfolio_unrealized = total_unreal if not has_missing_price else None
-        portfolio_total = (portfolio_realized + total_unreal) if not has_missing_price else None
+        portfolio_realized = total_realized
+        portfolio_unrealized = total_unrealized if not has_missing_price else None
+        portfolio_total = (portfolio_realized + total_unrealized) if not has_missing_price else None
         portfolio_return_pct = portfolio_total / account_aum if account_aum > 0 and portfolio_total is not None else None
         
         account_timeline[ts_str] = {
-            "positions": account_positions,
             "portfolio_realized_pnl": portfolio_realized,
             "portfolio_unrealized_pnl": portfolio_unrealized,
             "portfolio_total_pnl": portfolio_total,
@@ -277,6 +338,7 @@ def compute_pnl_timeline(
         }
     
     timeline[f"account_{account}"] = account_timeline
+    print(f"Computed account timeline for account {account} with {len(account_timeline)} entries")
     return timeline
 
 # --- MAIN ---
