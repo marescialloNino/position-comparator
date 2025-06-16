@@ -27,10 +27,7 @@ class BitgetMarket(MotherFeeder):
     def _init_API(self):
         """Load API credentials from environment variables based on account."""
         env_vars = {
-            0: ('BITGET_TRADE_API_KEY', 'BITGET_TRADE_API_SECRET', 'BITGET_API_PASSWORD'),
-            1: ('BITGET_PAIRSPREAD1_API_KEY', 'BITGET_PAIRSPREAD1_API_SECRET', 'BITGET_API_PASSWORD'),
-            2: ('BITGET_PAIRSPREAD2_API_KEY', 'BITGET_PAIRSPREAD2_API_SECRET', 'BITGET_API_PASSWORD'),
-            'H1': ('BITGET_HEDGE1_API_KEY', 'BITGET_HEDGE1_API_SECRET', 'BITGET_API_PASSWORD'),
+            'H1': ('BITGET_H1_API_KEY', 'BITGET_H1_API_SECRET', 'BITGET_API_PASSWORD'),
             '2': ('BITGET_2_API_KEY', 'BITGET_2_API_SECRET', 'BITGET_API_PASSWORD')
         }
         if self.account not in env_vars:

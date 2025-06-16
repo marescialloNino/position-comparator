@@ -7,15 +7,13 @@ import argparse
 from typing import Dict, List
 import os
 from dotenv import load_dotenv
-
-# Import TGMessenger
-from bot_reporting import TGMessenger
+import telegram
+import asyncio
 
 # Import paths
-from paths import AGGREGATED_POSITIONS_FILE, BITGET_POSITIONS_FILE, ENV_FILE
+from paths import AGGREGATED_POSITIONS_FILE, BITGET_POSITIONS_FILE, ENV_FILE, LOG_DIR
 
-# Configure logging
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
@@ -39,15 +37,14 @@ def load_json_file(file_path: Path) -> Dict:
         logger.error(f"Failed to load {file_path}: {str(e)}")
         raise
 
-def send_telegram_alert(message: str):
-    """Send alert message to configured Telegram channel."""
-    logger.info(f"Sending alert: {message}")
+async def send_telegram_alert(message: str, bot_token: str, chat_id: str):
+    """Send a Telegram alert."""
     try:
-        response = TGMessenger.send(message, 'bitget_monitor')
-        if isinstance(response, dict) and not response.get("ok", False):
-            logger.error(f"Telegram response error: {response}")
+        bot = telegram.Bot(token=bot_token)
+        await bot.send_message(chat_id=chat_id, text=message)
+        logger.info(f"Sent Telegram alert: {message}")
     except Exception as e:
-        logger.error(f"Telegram alert failed: {e}")
+        logger.error(f"Failed to send Telegram alert: {str(e)}")
 
 def within_tolerance(value1: float, value2: float, tolerance_percent: float = 1.0) -> bool:
     """Check if two values are within a given percentage tolerance."""
@@ -57,10 +54,13 @@ def within_tolerance(value1: float, value2: float, tolerance_percent: float = 1.
         return abs(value1 - value2) <= abs(0.01 * tolerance_percent * max(abs(value1), abs(value2)))
     return abs(value1 - value2) / abs(value1) * 100 <= tolerance_percent
 
-def compare_positions(theo_data: Dict, bitget_data: Dict, account: str) -> None:
+def compare_positions(theo_data: Dict, bitget_data: Dict, account: str, bot_token: str, chat_id: str) -> None:
     """Compare theoretical and Bitget positions, sending Telegram alerts for mismatches."""
     theo_positions = {pos['asset']: pos for pos in theo_data.get('positions', [])}
     bitget_positions = {pos['asset']: pos for pos in bitget_data.get('positions', [])}
+
+    # Initialize asyncio event loop for Telegram alerts
+    loop = asyncio.get_event_loop()
 
     # Compare tokens in theoretical positions
     for asset, theo_pos in theo_positions.items():
@@ -74,7 +74,7 @@ def compare_positions(theo_data: Dict, bitget_data: Dict, account: str) -> None:
                 f"Alert: Asset {asset} in theoretical positions for account {account} "
                 f"(qty: {theo_qty}, executing: {executing}) not found in Bitget positions."
             )
-            send_telegram_alert(message)
+            loop.run_until_complete(send_telegram_alert(message, bot_token, chat_id))
             continue
 
         bitget_qty = bitget_positions[asset]['qty']
@@ -92,7 +92,7 @@ def compare_positions(theo_data: Dict, bitget_data: Dict, account: str) -> None:
                     f"Theoretical qty: {theo_qty}, target_execution_qty: {target_execution_qty}, "
                     f"Bitget qty: {bitget_qty}. Bitget qty not in range [{min_qty}, {max_qty}] ± 1%."
                 )
-                send_telegram_alert(message)
+                loop.run_until_complete(send_telegram_alert(message, bot_token, chat_id))
         else:
             # For non-executing positions, check if quantities are within 1% tolerance
             if not within_tolerance(theo_qty, bitget_qty, 1.0):
@@ -100,7 +100,7 @@ def compare_positions(theo_data: Dict, bitget_data: Dict, account: str) -> None:
                     f"Alert: Asset {asset} in account {account} has quantity mismatch. "
                     f"Theoretical qty: {theo_qty}, Bitget qty: {bitget_qty} (diff > 1%)."
                 )
-                send_telegram_alert(message)
+                loop.run_until_complete(send_telegram_alert(message, bot_token, chat_id))
 
     # Check for tokens in Bitget positions but not in theoretical positions
     for asset in bitget_positions:
@@ -110,7 +110,7 @@ def compare_positions(theo_data: Dict, bitget_data: Dict, account: str) -> None:
                 f"Alert: Asset {asset} in Bitget positions for account {account} "
                 f"(qty: {bitget_qty}) not found in theoretical positions."
             )
-            send_telegram_alert(message)
+            loop.run_until_complete(send_telegram_alert(message, bot_token, chat_id))
 
 def main():
     """Main function to compare theoretical and Bitget positions."""
@@ -125,9 +125,10 @@ def main():
             raise FileNotFoundError(f".env file not found at {ENV_FILE}")
         load_dotenv(dotenv_path=ENV_FILE)
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if not bot_token:
-            logger.error("Missing TELEGRAM_BOT_TOKEN environment variable")
-            raise ValueError("Missing TELEGRAM_BOT_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if not all([bot_token, chat_id]):
+            logger.error("Missing Telegram environment variables: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+            raise ValueError("Missing Telegram environment variables")
 
         # Load JSON files
         theo_file = AGGREGATED_POSITIONS_FILE(args.account)
@@ -139,7 +140,7 @@ def main():
 
         # Compare positions
         logger.info(f"Comparing positions for account {args.account}")
-        compare_positions(theo_data, bitget_data, args.account)
+        compare_positions(theo_data, bitget_data, args.account, bot_token, chat_id)
         logger.info("Position comparison completed.")
 
     except Exception as e:

@@ -1,4 +1,3 @@
-
 import asyncio
 import sys
 import os
@@ -11,14 +10,9 @@ import argparse
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from hedge_monitoring.datafeed import bitgetfeed as bg
+from datafeed import bitgetfeed as bg
 
-# --- CONFIG ---
-MODULE_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = MODULE_DIR / "output_bitget"
-LOG_DIR = MODULE_DIR / "logs"
-ERROR_FLAGS_PATH = OUTPUT_DIR / "hedge_error_flags.json"
-ENV_FILE = MODULE_DIR / ".env"
+from paths import ENV_FILE, OUTPUT_DIR, LOG_DIR, ERROR_FLAGS_PATH, BITGET_POSITIONS_FILE
 
 # Configure logging
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -34,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Ensure output directory exists
 def ensure_output_directory():
-    """Ensure output and log directories exist."""
+    """Ensure output directory exists."""
     try:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     except Exception as e:
@@ -133,13 +127,11 @@ async def fetch_bitget_positions(account: str):
             position_data.append({
                 "asset": symbol,
                 "qty": qty,
-                "usd_value": amount,
-                "entry_price": entry_price,
-                "entry_time": entry_ts.strftime('%Y/%m/%d %H:%M:%S.%f') if entry_ts else current_time
+                "usd_value": amount
             })
 
         # Save positions to JSON
-        output_file = OUTPUT_DIR / f"bitget_positions_{account}.json"
+        output_file = BITGET_POSITIONS_FILE(account)
         with output_file.open('w') as f:
             json.dump({
                 "timestamp": current_time,
