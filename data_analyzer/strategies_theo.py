@@ -15,10 +15,9 @@ from datetime import datetime, timedelta
 import pandas as pd
 from pathlib import Path
 
-from config_manager import ConfigManager
+from common.config_manager import ConfigManager
 
-MODULE_DIR = Path(__file__).resolve().parent
-BOT_DATA_DIR = MODULE_DIR / "bot_data"
+from common.paths import BOT_DATA_DIR, CONFIG_FILE, PRICES_DIR, OUTPUT_DIR
 
 @dataclass
 class PortfolioEntry:
@@ -144,7 +143,6 @@ class Strategy:
                             direction = int(float(direction.strip()))  # Convert to int, expecting 1 or -1
                             if direction not in [1, -1]:
                                 print(f"Warning: Invalid direction {direction} for {asset} in {file_path}")
-                                continue
                             positions.append((asset, direction))
                         except ValueError:
                             print(f"Warning: Invalid quantity in line {i+1}: {direction}")
@@ -267,15 +265,16 @@ class Strategy:
             print(f"Warning: No snapshots generated for strategy {self.name}")
 
         # Write output files
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        with open(output_file, 'w') as f:
+        output_path = OUTPUT_DIR / Path(output_file).name
+        closed_path = OUTPUT_DIR / Path(closed_file).name
+        with open(output_path, 'w') as f:
             json.dump(self.portfolio_snapshots, f, indent=4)
-        with open(closed_file, 'w') as f:
+        with open(closed_path, 'w') as f:
             json.dump(self.closed_positions, f, indent=4)
-        print(f"Generated {output_file} and {closed_file} for strategy {self.name}")
+        print(f"Generated {output_path} and {closed_path} for strategy {self.name}")
 
 class StrategyManager:
-    def __init__(self, config_file: str = 'config_pair_session_bitget.json'):
+    def __init__(self, config_file: str = CONFIG_FILE):
         self.config_manager = ConfigManager(config_file)
         self.strategies: Dict[str, Strategy] = {}
 
@@ -284,14 +283,14 @@ class StrategyManager:
 
     def load_price_matrix(self, exchange: str) -> pd.DataFrame:
         """Load the price matrix for a given exchange."""
-        price_matrix_path = MODULE_DIR / "price_data" / exchange.lower() / "theoretical_open_15m.csv"
+        price_matrix_path = PRICES_DIR / exchange.lower() / "theoretical_open_15m.csv"
         if not price_matrix_path.exists():
             raise FileNotFoundError(f"No price matrix found at {price_matrix_path}")
         df = pd.read_csv(price_matrix_path, parse_dates=["timestamp"]).set_index("timestamp")
         df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
         return df
 
-    def aggregate_account_portfolio(self, account: str, exchange: str, price_matrix: pd.DataFrame, output_dir: str):
+    def aggregate_account_portfolio(self, account: str, exchange: str, price_matrix: pd.DataFrame):
         """Aggregate positions across all strategies in the same account."""
         # Collect all timestamps and relevant strategies
         all_timestamps = set()
@@ -338,7 +337,7 @@ class StrategyManager:
                 strat_timestamps = sorted(
                     datetime.strptime(ts_str, '%Y/%m/%d %H:%M:%S.%f')
                     for ts_str in strat.portfolio_snapshots.keys()
-                    if datetime.strptime(ts_str, '%Y/%m/%d %H:%M:%S.%f') <= ts
+                    if datetime.strptime(ts_str , '%Y/%m/%d %H:%M:%S.%f') <= ts
                 )
                 if not strat_timestamps:
                     continue
@@ -375,11 +374,10 @@ class StrategyManager:
             return
 
         # Write output file
-        output_file = os.path.join(output_dir, f"account_{account}_portfolio.json")
-        os.makedirs(output_dir, exist_ok=True)
-        with open(output_file, 'w') as f:
+        output_path = OUTPUT_DIR / f"account_{account}_portfolio.json"
+        with open(output_path, 'w') as f:
             json.dump(account_portfolio, f, indent=4)
-        print(f"Generated {output_file} for account {account} on exchange {exchange}")
+        print(f"Generated {output_path} for account {account} on exchange {exchange}")
 
     def process_all_current_state_logs(self):
         """Process current_state.log for all active strategies and aggregate account portfolios."""
@@ -397,7 +395,6 @@ class StrategyManager:
                 continue
 
         accounts = set()
-        output_dir = self.config_manager.get_output_directory()
         for strat in self.config_manager.get_active_strategies():
             strat_name = strat['name']
             exchange = strat.get('exchange_trade', 'bitget')
@@ -408,10 +405,10 @@ class StrategyManager:
             accounts.add((account, exchange))
             price_matrix = price_matrices.get(exchange)
             if price_matrix is None:
-                print(f"Warning: Price matrix not found for exchange '{exchange}', skipping strategy '{strat_name}'")
+                print(f"Warning: Price matrix not found for exchange '{exchange}', skipping strategy {strat_name}")
                 continue
-            output_file = f"{output_dir}/portfolio_{strat_name}.json"
-            closed_file = f"{output_dir}/closed_positions_{strat_name}.json"
+            output_file = f"portfolio_{strat_name}.json"
+            closed_file = f"closed_positions_{strat_name}.json"
             print(f"Processing strategy: {strat_name}")
             self.strategies[strat_name].process_current_state_log(price_matrix, output_file, closed_file)
 
@@ -419,9 +416,9 @@ class StrategyManager:
         for account, exchange in accounts:
             price_matrix = price_matrices.get(exchange)
             if price_matrix is None:
-                print(f"Warning: Price matrix not found for exchange '{exchange}', skipping account '{account}'")
+                print(f"Warning: Price matrix not found for exchange '{exchange}', skipping account {account}")
                 continue
-            self.aggregate_account_portfolio(account, exchange, price_matrix, output_dir)
+            self.aggregate_account_portfolio(account, exchange, price_matrix)
 
 if __name__ == "__main__":
     manager = StrategyManager()

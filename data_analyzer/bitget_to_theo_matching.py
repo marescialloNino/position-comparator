@@ -11,7 +11,7 @@ import telegram
 import asyncio
 
 # Import paths
-from paths import AGGREGATED_POSITIONS_FILE, BITGET_POSITIONS_FILE, ENV_FILE, LOG_DIR
+from common.paths import AGGREGATED_POSITIONS_FILE, BITGET_POSITIONS_FILE, ENV_FILE, LOG_DIR
 
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)

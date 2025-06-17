@@ -9,20 +9,16 @@ from datetime import datetime, timedelta
 import pandas as pd
 from pandas.errors import InvalidIndexError
 
-# Add project root to path for imports
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-import datafeed.binancefeed as bf
-import datafeed.bitgetfeed as bitget_df
-import datafeed.okexfeed as okex_df
+from common.paths import OUTPUT_DIR, BOT_DATA_DIR, CONFIG_FILE
+
+import bot_data_fetcher.datafeed.binancefeed as bf
+import bot_data_fetcher.datafeed.bitgetfeed as bitget_df
+import bot_data_fetcher.datafeed.okexfeed as okex_df
 
 # --- CONFIG ---
-MODULE_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = MODULE_DIR / "price_data"
-BOT_DATA_DIR = MODULE_DIR / "bot_data"
 TIMEFRAME = "15m"
 BAR_INTERVAL = pd.Timedelta(minutes=15)
-CONFIG_FILE = MODULE_DIR / "config_pair_session_bitget.json"
-FETCH_EXTENSION = timedelta(hours=24)  # Extend fetch windows 
+FETCH_EXTENSION = timedelta(hours=48)  # Extend fetch windows 
 
 # --- UTILITIES ---
 def load_config() -> Dict[str, any]:

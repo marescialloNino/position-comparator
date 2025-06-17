@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import asyncio
-from datafeed.motherfeeder import MotherFeeder
+from bot_data_fetcher.datafeed.motherfeeder import MotherFeeder
 
 
 class OkexMarket(MotherFeeder):

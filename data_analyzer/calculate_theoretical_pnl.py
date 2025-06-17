@@ -18,13 +18,8 @@ from typing import Dict, Any, Optional, List, Tuple
 import pandas as pd
 import numpy as np
 
-# Ensure project root on path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from common.paths import OUTPUT_DIR, CONFIG_FILE, PRICES_DIR
 
-# --- CONFIG ---
-MODULE_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = MODULE_DIR / "output_bitget"
-CONFIG_FILE = MODULE_DIR / "config_pair_session_bitget.json"
 PORTFOLIO_PATTERN = "portfolio_{strategy}.json"
 CLOSED_PATTERN = "closed_positions_{strategy}.json"
 
@@ -43,7 +38,7 @@ def get_output_paths() -> Dict[str, Path]:
 
 def load_price_matrix() -> pd.DataFrame:
     """Load bitget price matrix."""
-    price_matrix_path = MODULE_DIR / "price_data" / "bitget" / "theoretical_open_15m.csv"
+    price_matrix_path = PRICES_DIR/ "bitget" / "theoretical_open_15m.csv"
     if not price_matrix_path.exists():
         raise FileNotFoundError(f"No price matrix found at {price_matrix_path}")
     df = pd.read_csv(price_matrix_path, parse_dates=["timestamp"]).set_index("timestamp")

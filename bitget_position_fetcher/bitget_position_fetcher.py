@@ -10,9 +10,9 @@ import argparse
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from datafeed import bitgetfeed as bg
+from bitget_position_fetcher.datafeed import bitgetfeed as bg
 
-from paths import ENV_FILE, OUTPUT_DIR, LOG_DIR, ERROR_FLAGS_PATH, BITGET_POSITIONS_FILE
+from common.paths import ENV_FILE, OUTPUT_DIR, LOG_DIR, ERROR_FLAGS_PATH, BITGET_POSITIONS_FILE
 
 # Configure logging
 LOG_DIR.mkdir(parents=True, exist_ok=True)

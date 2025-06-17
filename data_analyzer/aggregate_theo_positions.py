@@ -7,7 +7,7 @@ import argparse
 from typing import Dict, List
 
 # Import paths
-from paths import CONFIG_FILE, OUTPUT_DIR, LOG_DIR, CURRENT_STATE_FILE, AGGREGATED_POSITIONS_FILE
+from common.paths import CONFIG_FILE, OUTPUT_DIR, LOG_DIR, CURRENT_STATE_FILE, AGGREGATED_POSITIONS_FILE
 
 # Configure logging
 LOG_DIR.mkdir(parents=True, exist_ok=True)

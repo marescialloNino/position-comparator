@@ -1,12 +1,12 @@
 
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 import logging
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
 
 load_dotenv()
 
@@ -21,13 +21,23 @@ if not ROOT_DIR.exists():
     logger.error(f"ROOT_PATH directory does not exist: {ROOT_DIR}")
     raise FileNotFoundError(f"ROOT_PATH directory does not exist: {ROOT_DIR}")
 
-# Define paths
-CONFIG_FILE = ROOT_DIR / "config_pair_session_bitget.json"
-OUTPUT_DIR = ROOT_DIR / "output_bitget"
-LOG_DIR = ROOT_DIR / "logs"
-BOT_DATA_DIR = ROOT_DIR / "bot_data"
-ERROR_FLAGS_PATH = OUTPUT_DIR / "hedge_error_flags.json"
+# Add project root to sys.path if not already present
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 ENV_FILE = ROOT_DIR / ".env"
+
+LOG_DIR = ROOT_DIR / "logs"
+DATA_DIR = ROOT_DIR / "data"
+
+BOT_DATA_DIR = DATA_DIR / "bot_data"
+OUTPUT_DIR = DATA_DIR / "output_bitget"
+PRICES_DIR = DATA_DIR / "price_data"
+
+# Define paths
+CONFIG_FILE = BOT_DATA_DIR / "config_pair_session_bitget.json"
+
+ERROR_FLAGS_PATH = OUTPUT_DIR / "hedge_error_flags.json"
 
 # File path templates
 BITGET_POSITIONS_FILE = lambda account: OUTPUT_DIR / f"bitget_positions_{account}.json"
@@ -38,6 +48,8 @@ BITGET_POSITIONS_FILE= lambda account: OUTPUT_DIR / f"bitget_positions_{account}
 
 # Ensure directories exist
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+PRICES_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 BOT_DATA_DIR.mkdir(parents=True, exist_ok=True)
 

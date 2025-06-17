@@ -4,8 +4,8 @@ import os
 from dotenv import load_dotenv
 from pathlib import Path
 
-# Configure logging
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+from common.paths import LOG_DIR
+
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,

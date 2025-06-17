@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 *.json
+*.csv
+*.log
+*.pos
+*.pos_
 .env
 # C extensions
 *.so

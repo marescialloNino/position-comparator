@@ -9,7 +9,7 @@ except:
     from datetime import timezone
     UTC = timezone.utc
 import asyncio
-from datafeed.motherfeeder import MotherFeeder
+from bot_data_fetcher.datafeed.motherfeeder import MotherFeeder
 
 
 class BinanceMarket(MotherFeeder):

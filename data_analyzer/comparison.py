@@ -9,10 +9,10 @@ import os
 from dotenv import load_dotenv
 
 # Import TGMessenger
-from bot_reporting import TGMessenger
+from common.bot_reporting import TGMessenger
 
 # Import paths
-from paths import AGGREGATED_POSITIONS_FILE, BITGET_POSITIONS_FILE, ENV_FILE
+from common.paths import AGGREGATED_POSITIONS_FILE, BITGET_POSITIONS_FILE, ENV_FILE
 
 # Configure logging
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"

@@ -9,6 +9,7 @@ Provides access to active strategies, allocations, output directory, and AUM cal
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import json
+from common.paths import CONFIG_FILE, OUTPUT_DIR
 
 class ConfigManager:
     """Singleton class for managing configuration data."""
@@ -23,11 +24,11 @@ class ConfigManager:
     def __init__(self, config_file: str = None):
         if self._initialized:
             return
-        self._config_file = Path(config_file or "config_pair_session_bitget.json")
+        self._config_file = Path(config_file or CONFIG_FILE)
         self._config: Dict = {}
         self._active_strategies: List[Dict] = []
         self._allocations: Dict = {}
-        self._output_directory: Path = Path("output_bitget")
+        self._output_directory: Path = OUTPUT_DIR
         self._load_config()
         self._initialized = True
 
