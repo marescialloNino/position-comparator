@@ -1,0 +1,14 @@
+working_directory: ../microservice/
+pace:
+  REFRESH: 30
+  PNL: 30
+  POS: 30
+  RUNNING: 30
+  MULTI: 60
+session:
+  bitget:
+    config_file: ../microservice/config/config_pair_session_bitget.json
+    check_running: true
+    check_realpose: true
+    check_pnl: true
+    session_file: ../microservice/output_bitget/session.log

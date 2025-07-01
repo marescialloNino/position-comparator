@@ -141,6 +141,9 @@ class BinanceFutureMarket(MotherFeeder):
         elif self.account == 'nickel_cm1':
             self.__API_KEY = os.environ['BINANCE_NICKEL_CM1_API_KEY']
             self.__API_SEC = os.environ['BINANCE_NICKEL_CM1_API_SECRET']
+        elif self.account == '':
+            self.__API_KEY = ''
+            self.__API_SEC = ''
         else:
             self.__API_KEY = os.environ['BINANCE_READ_API_KEY']
             self.__API_SEC = os.environ['BINANCE_READ_API_SECRET']

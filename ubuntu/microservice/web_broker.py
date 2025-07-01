@@ -16,8 +16,8 @@ import traceback
 from string import ascii_letters, digits
 from random import choice
 
-import http_nt_pclient
-from http_nt_pclient.rest import ApiException
+# import http_nt_pclient
+# from http_nt_pclient.rest import ApiException
 
 from reporting.bot_reporting import TGMessenger
 from datafeed.broker_handler import BrokerHandler
@@ -65,19 +65,19 @@ async def get_any(session, upi):
         response = await resp.read()
         return {'status_code': resp.status, 'text': response}
 
-def build_broker(destination, account_trade, broker_handler, market_name, chat_channel):
-    if destination == 'dummy':
+def build_broker(destination, account_trade, broker_handler, market_name, chat_channel, use_dummy=False):
+    if use_dummy or destination == 'dummy':
         return DummyBroker(market=market_name, account=account_trade)
     elif destination == 'edo':
         return EdoSpreaderBroker(broker_handler=broker_handler, market=market_name, chat_channel=chat_channel,
-                                 account=account_trade)
+                                account=account_trade)
     elif destination == 'web':
         bro = WebSpreaderBroker(broker_handler=broker_handler, market=market_name, chat_channel=chat_channel,
                                 account=account_trade)
         return bro
     elif destination == 'nickel':
         bro = NickelBroker(broker_handler=broker_handler, market=market_name, chat_channel=chat_channel,
-                                account=account_trade)
+                          account=account_trade)
         return bro
     else:
         return None
@@ -665,7 +665,7 @@ class WebSpreaderBroker:
         self.id = str(uuid.uuid4())
         return self.id
 
-class NickerListener:
+""" class NickerListener:
     def __init__(self, logger, twap_api):
         self.listener_task = None
         self.subscriptions = set()
@@ -674,10 +674,7 @@ class NickerListener:
         self._logger = logger
 
     def message_age(self) -> float:
-        """
-        Age in seconds
-        :return: message age
-        """
+
         return (today_utc() - self.results['last_modified']).total_seconds()
 
     async def _retrieve_twap(self):
@@ -754,9 +751,7 @@ class NickerListener:
             return {}
 
     def result_from_watcher_spread(self, strat_id):
-        """
-        Spread execution for 2 legs
-        """
+
         result = self._get_strat_result(strat_id=strat_id)
         try:
             leg1_exec_qty = float(result.get('leg1ExecQty', 0))  # toujours signé
@@ -770,9 +765,7 @@ class NickerListener:
         return (leg1_exec_qty, leg2_exec_qty), spread, (leg1_exec_prc, leg2_exec_prc)
 
     def result_from_watcher_twin(self, strat_id):
-        """
-        Double execution for 2 legs
-        """
+
         result1 = self._get_strat_result(strat_id=strat_id+'L1')
         result2 = self._get_strat_result(strat_id=strat_id+'L2')
         spread = 0.0
@@ -1010,7 +1003,7 @@ class NickelBroker:
                 await TGMessenger.send_async(session, message, chat_channel='AwsMonitor')
                 await session.close()
 
-            return False
+            return False 
 
         return True
 
@@ -1088,7 +1081,7 @@ class NickelBroker:
     @property
     def get_id(self):
         self.id =  ''.join([choice(ascii_letters + digits) for i in range(6)])
-        return self.id
+        return self.id"""
 
 class EdoSpreaderBroker:
     ACCOUNT_DICT = {
@@ -1146,7 +1139,6 @@ class EdoSpreaderBroker:
     async def send_pair_order(self, id, s1, s2, spread_shift, action, target_size1, target_size2, prices, nature,
                               comment):
         """
-
         :param id: int, id of order
         :param s1: str, ticker1
         :param s2: str, ticker2

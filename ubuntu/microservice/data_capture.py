@@ -182,9 +182,10 @@ def histo_filler(current_db, access_point, market, perimeter, tf, start_time, en
     return new_db
 
 
-def fill_data(feed, coin_perimeter, time_zone, audit_mode=False, trimming=False):
-    '''
-    '''
+
+
+# Update fill_data to use DummyMarket when use_dummy is True
+def fill_data(feed, coin_perimeter, time_zone, audit_mode=False, trimming=False, use_dummy=False):
     market = feed['exchange']
     datafile = feed['database']
     tf = feed['timeframe']
@@ -202,7 +203,6 @@ def fill_data(feed, coin_perimeter, time_zone, audit_mode=False, trimming=False)
         LOGGER.info(f'Trimming database {market} to {feed["min_depth_months"]} months')
         min_depth = timedelta(weeks=feed['min_depth_months'] * 52 / 12)
         max_depth = min_depth
-
         current_db, start_time, end_time, coin_report = prepare_db(datafile, coin_perimeter, time_zone, min_depth, max_depth)
         return
 
@@ -216,42 +216,49 @@ def fill_data(feed, coin_perimeter, time_zone, audit_mode=False, trimming=False)
             j = json.dumps(coin_report, indent=4, cls=NpEncoder)
             print(j, file=myfile)
         return
-
+    
     # if latests bar is less than 3h old, we only fill old holes in histo
     just_holes = (dt2ts(datetime.today()) - end_time.timestamp()) / 3600 < 3
 
-    if market == 'binance':
-        ap = bnf.BinanceMarket()
-    elif market == 'binancefut':
-        ap = bnf.BinanceFutureMarket()
-    elif market == 'okex':
-        ap = okf.OkexMarket()
-    elif market == 'bybit':
-        ap = bbf.BybitMarket()
-    elif market == 'bitget':
-        ap = bgf.BitgetMarket()
-    elif market == 'hyperliquid':
-        ap = hlf.HyperliquidMarket()
-    else:
+    # Use DummyMarket if --dummy is specified or market is 'dummy'
+    if use_dummy or market == 'dummy':
         ap = dyf.DummyMarket()
+    else:
+        if market == 'binance':
+            ap = bnf.BinanceMarket()
+        elif market == 'binancefut':
+            ap = bnf.BinanceFutureMarket()
+        elif market == 'okex':
+            ap = okf.OkexMarket()
+        elif market == 'bybit':
+            ap = bbf.BybitMarket()
+        elif market == 'bitget':
+            ap = bgf.BitgetMarket()
+        elif market == 'hyperliquid':
+            ap = hlf.HyperliquidMarket()
+        else:
+            ap = dyf.DummyMarket()
 
     new_db = histo_filler(current_db, ap, market, coin_perimeter, tf, start_time, end_time, just_holes)
-    # Remove dup rows
     new_db = new_db.loc[~new_db.index.duplicated(keep='last')]
     new_db.to_pickle(datafile)
-
     return
 
 
+
+# In ubuntu/microservice/data_capture.py
+# In the main() function, add the --dummy argument
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", help="input file", required=True)
     parser.add_argument("--audit", required=False, action='store_true')
     parser.add_argument("--trimming", required=False, action='store_true')
+    parser.add_argument("--dummy", required=False, action='store_true', help="Use dummy market and broker for local testing")
     args = parser.parse_args()
     config_file = args.config
     audit_mode = args.audit
     trimming = args.trimming
+    use_dummy = args.dummy  # New flag
 
     with open(config_file, 'r') as myfile:
         params = json.load(myfile)
@@ -278,11 +285,9 @@ def main():
     for feed in feeds:
         if feed['perimeter'] in perimeters:
             coin_perimeter = perimeters[feed['perimeter']]
-            fill_data(feed, coin_perimeter, tz_string, audit_mode, trimming)
-    # loops = [fill_data(feed) for feed in feeds]
-    # await gather(*loops)
-
+            fill_data(feed, coin_perimeter, tz_string, audit_mode, trimming, use_dummy=use_dummy)  # Pass use_dummy
     return
+
 
 
 if __name__ == '__main__':

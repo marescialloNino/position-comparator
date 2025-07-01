@@ -73,14 +73,11 @@ def aggregate_positions(strategies: List[str]) -> List[Dict]:
                 asset_positions[asset] = {
                     'qty': 0,
                     'total_value': 0,
-                    'total_qty': 0,
                     'executing': False,
                     'target_execution_qty': 0
                 }
 
             asset_positions[asset]['qty'] += qty
-            asset_positions[asset]['total_value'] += qty * entry_price
-            asset_positions[asset]['total_qty'] += abs(qty)
             asset_positions[asset]['executing'] |= in_execution  # Set to True if any position is executing
             asset_positions[asset]['target_execution_qty'] += target_qty if in_execution else 0
 
@@ -90,17 +87,74 @@ def aggregate_positions(strategies: List[str]) -> List[Dict]:
         qty = data['qty']
         if qty == 0:
             continue  # Skip zero-quantity positions
-        avg_entry_price = data['total_value'] / data['total_qty'] if data['total_qty'] != 0 else 0
-        usd_value = qty * avg_entry_price
         position_data.append({
             "asset": asset,
             "qty": qty,
-            "usd_value": usd_value,
             "executing": data['executing'],
             "target_execution_qty": data['target_execution_qty']
         })
     
     return position_data
+
+
+async def aggregate_theo_positions(strategy_positions: List[Dict]) -> Dict:
+    """Aggregate theoretical positions from a list of current_coin_info dictionaries.
+    
+    Args:
+        strategy_positions: List of dictionaries containing current_coin_info data.
+        
+    Returns:
+        Dict with structure {'pose': {asset: {'quantity': float, 'ref_price': float, 
+                            'amount': float, 'entry_ts': str, 'executing': bool, 
+                            'target_execution_qty': float}}}.
+    """
+    asset_positions = {}  # {asset: {'qty': float, 'total_value': float, 'total_qty': float, 'executing': bool, 'target_execution_qty': float}}
+
+    for positions in strategy_positions:
+        if not positions:  # Skip empty or invalid position data
+            logger.warning("Empty or invalid position data received")
+            continue
+        for asset, pos_data in positions.items():
+            qty = pos_data.get('quantity', 0) * pos_data.get('position', 1)
+            entry_price = pos_data.get('entry_exec', 0)
+            in_execution = pos_data.get('in_execution', False)
+            target_qty = pos_data.get('target_qty', 0) if in_execution else 0
+
+            if qty == 0 or entry_price == 0:
+                continue
+
+            if asset not in asset_positions:
+                asset_positions[asset] = {
+                    'qty': 0,
+                    'executing': False,
+                    'target_execution_qty': 0
+                }
+
+            asset_positions[asset]['qty'] += qty
+            asset_positions[asset]['executing'] |= in_execution
+            asset_positions[asset]['target_execution_qty'] += target_qty if in_execution else 0
+
+    # Convert to output format
+    position_data = {}
+    for asset, data in asset_positions.items():
+        qty = data['qty']
+        if qty == 0:
+            continue  # Skip zero-quantity positions
+        avg_entry_price = data['total_value'] / data['total_qty'] if data['total_qty'] != 0 else 0
+        usd_value = qty * avg_entry_price
+        position_data[asset] = {
+            'quantity': qty,
+            'ref_price': avg_entry_price,
+            'amount': usd_value,
+            'entry_ts': '',  # Placeholder, as entry_ts is not provided
+            'executing': data['executing'],
+            'target_execution_qty': data['target_execution_qty']
+        }
+
+    logger.info(f"Aggregated {len(position_data)} positions")
+    return {'pose': position_data}
+
+
 
 def main():
     """Main function to aggregate theoretical positions."""
