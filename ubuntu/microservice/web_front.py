@@ -1,3 +1,4 @@
+
 import os
 import argparse
 import yaml
@@ -15,9 +16,6 @@ from pywebio.session import set_env
 
 GATEWAY = 'http://192.168.63.7:14440'
 
-from pywebio.output import put_datatable, JSFunction, output_register_callback
-from pywebio.utils import random_str
-
 def get_any(upi, params):
     response = requests.get(upi, params=params)
     return response
@@ -32,47 +30,44 @@ def dict_to_df(data_dict, mode=True):
                        for innerKey, secondDict in innerDict.items() for secondKey, values in secondDict.items()}
             df = pd.DataFrame(dic_new).T
             df.sort_index(axis=1, inplace=True)
-    except:
+    except Exception as e:
+        print(f"Error in dict_to_df: {e}")
         df = pd.DataFrame()
     return df
 
-def multistrategy_matching_to_df(data_dict, account_key, details_dict=None):
+def multistrategy_matching_to_df(details_dict):
     """
-    Convert multistrategy matching JSON and details JSON to a DataFrame with USD amounts.
-    :param data_dict: Dictionary from /multistrategy_matching endpoint.
-    :param account_key: The account key (e.g., 'bitget_2') to filter.
-    :param details_dict: Dictionary from /multistrategy_position_details endpoint for prices and strategy counts.
-    :return: DataFrame with columns token, theo_amount, real_amount, ref_price, executing, matching, strategy_count.
+    Convert multistrategy position details JSON to a main DataFrame and a summary DataFrame for exposures.
+    :param details_dict: Dictionary from /multistrategy_position_details endpoint.
+    :return: Tuple of (main DataFrame, summary DataFrame) with main_df columns token, theo_qty, real_qty, theo_amount, real_amount, ref_price, executing, matching, strategy_count, and summary_df with columns Net Exposure, Gross Exposure and rows Theo, Real.
     """
     try:
-        if account_key in data_dict:
-            data = data_dict[account_key]
-            df = pd.DataFrame.from_dict(data, orient='index')
-            df.reset_index(inplace=True)
-            df.rename(columns={'index': 'token'}, inplace=True)
-            df = df[['token', 'theo_qty', 'real_qty', 'executing', 'matching']]
-            if details_dict:
-                details_df = pd.DataFrame.from_dict(details_dict, orient='index')
-                details_df.reset_index(inplace=True)
-                details_df.rename(columns={'index': 'token'}, inplace=True)
-                df = df.merge(details_df[['token', 'ref_price', 'strategy_count']], on='token', how='left')
-                df['theo_amount'] = (df['theo_qty'] * df['ref_price']).round(0).astype(int)
-                df['real_amount'] = (df['real_qty'] * df['ref_price']).round(0).astype(int)
-                df['ref_price'] = df['ref_price'].fillna(0.0)
-                df['strategy_count'] = df['strategy_count'].fillna(0).astype(int)
-                df = df[['token', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count']]
-            else:
-                df['theo_amount'] = 0
-                df['real_amount'] = 0
-                df['ref_price'] = 0.0
-                df['strategy_count'] = 0
-                df = df[['token', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count']]
-        else:
-            df = pd.DataFrame(columns=['token', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count'])
+        # Create main DataFrame
+        main_df = pd.DataFrame.from_dict(details_dict, orient='index')
+        main_df.reset_index(inplace=True)
+        main_df.rename(columns={'index': 'token'}, inplace=True)
+        main_df = main_df[['token', 'theo_qty', 'real_qty', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count']]
+        main_df['theo_amount'] = main_df['theo_amount'].fillna(0).astype(int)
+        main_df['real_amount'] = main_df['real_amount'].fillna(0).astype(int)
+        main_df['ref_price'] = main_df['ref_price'].fillna(0.0)
+        main_df['strategy_count'] = main_df['strategy_count'].fillna(0).astype(int)
+        
+        # Create summary DataFrame
+        summary_df = pd.DataFrame({
+            'Net Exposure': [int(main_df['theo_amount'].sum()), int(main_df['real_amount'].sum())],
+            'Gross Exposure': [int(main_df['theo_amount'].abs().sum()), int(main_df['real_amount'].abs().sum())]
+        }, index=['Theo', 'Real'])
+        
+        return main_df, summary_df
     except Exception as e:
         print(f"Error converting multistrategy matching data: {e}")
-        df = pd.DataFrame(columns=['token', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count'])
-    return df
+        main_df = pd.DataFrame(columns=['token', 'theo_qty', 'real_qty', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count'])
+        summary_df = pd.DataFrame({
+            'Net Exposure': [0, 0],
+            'Gross Exposure': [0, 0]
+        }, index=['Theo', 'Real'])
+        return main_df, summary_df
+
 
 def status_req(account):
     uri = GATEWAY + '/status'
@@ -82,13 +77,16 @@ def status_req(account):
         status_dict = {}
         try:
             status_dict = json.loads(response.content.decode())
-        except:
-            pass
+        except Exception as e:
+            print(f"JSON parse error for status: {e}")
         exchange, strat = account.split(':')
         if exchange in status_dict and strat in status_dict[exchange]:
             df = dict_to_df(status_dict[exchange][strat], True)
             with use_scope('status_rez'):
                 put_html(df.to_html())
+        else:
+            with use_scope('status_rez'):
+                put_text(f"No status data for {exchange}:{strat}")
 
 def multiply_req(account):
     exchange, account = account.split(':')
@@ -108,12 +106,22 @@ def multiply_req(account):
         clear('liquidate_rez')
         with use_scope('liquidate_rez'):
             put_html(response.content.decode())
+    else:
+        with use_scope('liquidate_rez'):
+            put_text(f"Error: Multiply endpoint returned status {response.status_code}: {response.text}")
 
 def set_req(account):
     exchange, account = account.split(':')
     params = {'exchange': exchange, 'account': account}
     uri = GATEWAY + '/pose'
     response = get_any(uri, params)
+    if response.ok:
+        clear('adjust_req')
+        with use_scope('adjust_req'):
+            put_html(response.content.decode())
+    else:
+        with use_scope('adjust_req'):
+            put_text(f"Error: Pose endpoint returned status {response.status_code}: {response.text}")
 
 def matching_req(account):
     exchange, strat = account.split(':')
@@ -141,6 +149,9 @@ def matching_req(account):
                 with open(figname, 'r') as figfile:
                     figure = figfile.read()
                     put_html(figure)
+    else:
+        with use_scope('matching_rez'):
+            put_text(f"Error: Matching endpoint returned status {response.status_code}: {response.text}")
 
 def pnl_req():
     uri = GATEWAY + '/pnl'
@@ -150,46 +161,46 @@ def pnl_req():
         pnl_dict = {}
         try:
             pnl_dict = json.loads(response.content.decode())
-        except:
-            pass
+        except Exception as e:
+            print(f"JSON parse error for pnl: {e}")
         df = dict_to_df(pnl_dict, False)
         with use_scope('pnl_rez'):
             put_html(df.to_html(float_format='{:5.2f}'.format))
+    else:
+        with use_scope('pnl_rez'):
+            put_text(f"Error: PnL endpoint returned status {response.status_code}: {response.text}")
+
+
 
 def multistrategy_matching_req(account):
     exchange, account = account.split(':')
     session_name = exchange.replace('_fut', '')
     account_key = f"{session_name}_{account}"
     
-    # Fetch multistrategy matching data
-    uri_matching = GATEWAY + '/multistrategy_matching'
-    response_matching = get_any(uri_matching, params={})
-    print(f"Matching response status: {response_matching.status_code}, content: {response_matching.content.decode()}")
-    
-    # Fetch position details for prices and strategy counts
+    # Fetch multistrategy position details
     uri_details = GATEWAY + '/multistrategy_position_details'
     params_details = {'session': session_name, 'account_key': account_key}
     response_details = get_any(uri_details, params=params_details)
-    print(f"Position details response status: {response_details.status_code}, content: {response_details.content.decode()}")
+    print(f"Position details response status: {response_details.status_code}")
     
     clear('multistrategy_matching_rez')
-    matching_dict = {}
-    try:
-        matching_dict = json.loads(response_matching.content.decode())
-        print(f"Matching dict: {matching_dict}")
-    except Exception as e:
-        print(f"JSON parse error for matching: {e}")
-    
-    details_dict = None
+    details_dict = {}
     if response_details.ok:
         try:
             details_dict = json.loads(response_details.content.decode())
-            print(f"Position details dict: {details_dict}")
         except Exception as e:
             print(f"JSON parse error for details: {e}")
+            with use_scope('multistrategy_matching_rez'):
+                put_text(f"Error: Failed to parse position details: {response_details.text}")
+            return
+    else:
+        with use_scope('multistrategy_matching_rez'):
+            put_text(f"Error: Position details endpoint returned status {response_details.status_code}: {response_details.text}")
+        return
     
-    df = multistrategy_matching_to_df(matching_dict, account_key, details_dict)
-    print(f"DataFrame: {df}")
+    main_df, summary_df = multistrategy_matching_to_df(details_dict)
+    main_df = main_df[['token', 'theo_amount', 'real_amount', 'executing', 'matching', 'strategy_count']]
+    main_df = main_df.sort_values(by='theo_amount', key=abs, ascending=False)
     
     # Custom formatter for ref_price: 2 decimals if >= 1, 3 significant figures if < 1
     def format_ref_price(x):
@@ -202,20 +213,25 @@ def multistrategy_matching_req(account):
     
     with use_scope('multistrategy_matching_rez'):
         put_html('<div class="metrics-container">')
-        if details_dict is None:
-            put_text("Warning: Unable to fetch price and strategy count data. Showing quantities only.")
-            put_html(df[['token', 'theo_qty', 'real_qty', 'executing', 'matching']].to_html(
-                formatters={
-                    'theo_qty': lambda x: f'{x:.2f}',
-                    'real_qty': lambda x: f'{x:.2f}'
-                }, classes='card'))
-        else:
-            put_html(df.to_html(formatters={
-                'theo_amount': lambda x: f'{x:d}',
-                'real_amount': lambda x: f'{x:d}',
-                'ref_price': format_ref_price,
+        # Display summary DataFrame
+        put_html(summary_df.to_html(
+            formatters={
+                'Net Exposure': lambda x: f'{x:.0f}' if pd.notna(x) else 'N/A',
+                'Gross Exposure': lambda x: f'{x:.0f}' if pd.notna(x) else 'N/A'
+            },
+            classes='card',
+            index=True
+        ))
+        put_html('<br>')  # Add spacing between summary and main table
+        # Display main table
+        put_html(main_df.to_html(
+            formatters={
+                'theo_amount': lambda x: f'{x:.0f}' if pd.notna(x) else 'N/A',
+                'real_amount': lambda x: f'{x:.0f}' if pd.notna(x) else 'N/A',
                 'strategy_count': lambda x: f'{x:d}'
-            }, classes='card'))
+            },
+            classes='card'
+        ))
         put_html('</div>')
 
 def main():

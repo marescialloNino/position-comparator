@@ -8,6 +8,7 @@ pace:
 session:
   bitget:
     config_file: ../microservice/config/config_pair_session_bitget.json
+    config_position_matching_file: ../microservice/config/config_position_matching.json
     check_running: true
     check_realpose: true
     check_pnl: true

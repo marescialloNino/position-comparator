@@ -1,33 +1,34 @@
-import os
+
+from fastapi import FastAPI, HTTPException
+from pathlib import Path
+from datetime import datetime, timedelta, timezone as UTC
 import json
+import pandas as pd
+import sys
+import traceback
+import matplotlib.pyplot as plt
 import aiofiles
 import asyncio
-import sys
-import base64
+import os
 import yaml
-from io import StringIO, BytesIO
-from datetime import datetime, timedelta, timezone as UTC
-import threading
+import base64
+from io import BytesIO, StringIO
 import logging
 from logging.handlers import TimedRotatingFileHandler
+import threading
 import argparse
-import traceback
-from fastapi import FastAPI, HTTPException
-from starlette.responses import JSONResponse, HTMLResponse
-import uvicorn
 from dotenv import load_dotenv
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 import aiohttp
+from starlette.responses import JSONResponse, HTMLResponse
+import uvicorn
+from enum import Enum
 from data_analyzer.aggregate_strategies import aggregate_theo_positions
 from datafeed.utils_online import NpEncoder, parse_pair, utc_ize, today_utc
 from datafeed.broker_handler import BrokerHandler
 from web_broker import WebSpreaderBroker
 from reporting.bot_reporting import TGMessenger
 from data_analyzer.position_comparator import compare_positions
-from enum import Enum
-from datetime import datetime, timedelta
 
 # Set up module-level logger
 logger = logging.getLogger(__name__)
@@ -96,7 +97,9 @@ async def read_aum_file(aum_file, exchange):
 class Processor:
     def __init__(self, config):
         self.session_config = config['session']
-        self.config_files = {session: self.session_config[session]['config_file'] for session in self.session_config}
+        self.config_files = {session: self.session_config[session]['config_file'] for session in self.session_config}      
+        self.config_position_matching_files = {session: self.session_config[session]['config_position_matching_file'] for session in self.session_config}
+        
         self.session_configs = {}
         for session, config_file in self.config_files.items():
             if os.path.exists(config_file):
@@ -105,6 +108,16 @@ class Processor:
                     self.session_configs[session] = params
             else:
                 logger.warning(f'No config file for {session} with name {config_file}')
+
+        self.session_matching_configs={}
+        for session, config_matching_file in self.config_position_matching_files.items():
+            if os.path.exists(config_matching_file):
+                with open(config_matching_file, 'r') as myfile:
+                    params = json.load(myfile)
+                    self.session_matching_configs[session] = params
+            else:
+                logger.warning(f'No config file for {session} with name {config_file}')
+
         self.aum = {}
         self.strategy_state = {}
         self.summaries = {}
@@ -158,66 +171,64 @@ class Processor:
             working_directory = self.session_configs[session]['working_directory']
             for (trade_exchange, account) in account_list[session]:
                 account_key = '_'.join((trade_exchange, account))
-                logger.info(f'Getting account positions for {trade_exchange}_{account}')
+                logger.info(f'Getting account positions for {account_key}')
                 trade_account_dir = os.path.join(working_directory, account_key)
                 actual_pos_file = os.path.join(trade_account_dir, 'current_state.pos')
-                if os.path.exists(actual_pos_file):
-                    async with aiofiles.open(actual_pos_file, 'r') as myfile:
-                        lines = await myfile.readlines()
-                        pos_str = lines[-1].strip() if lines else ''
-                        try:
-                            pos_data = {'pose': {}}
-                            if pos_str:
-                                parts = pos_str.split(';')
-                                if len(parts) < 2:
-                                    raise ValueError("Invalid format: missing semicolon")
-                                data_str = parts[1]
-                                pairs = data_str.split(', ')
-                                for pair in pairs:
-                                    key, value = pair.split(':')
-                                    key = key.strip("'")
-                                    if key in ['equity', 'imbalance']:
-                                        continue
-                                    pos_data['pose'][key] = {'quantity': float(value)}
-                            self.account_positions_from_bot[session][account_key] = pos_data
-                            logger.info(f'Parsed positions for {account_key}: {pos_data["pose"]}')
-                        except Exception as e:
-                            logger.error(f'Error parsing {actual_pos_file}: {e}')
-                            self.account_positions_from_bot[session][account_key] = {'pose': {}}
-                else:
-                    logger.warning(f'No current_state.pos for {account_key}')
+                if not os.path.exists(actual_pos_file):
+                    logger.warning(f'Position file {actual_pos_file} does not exist')
                     self.account_positions_from_bot[session][account_key] = {'pose': {}}
+                    continue
+                async with aiofiles.open(actual_pos_file, 'r') as myfile:
+                    lines = await myfile.readlines()
+                    pos_str = lines[-1].strip() if lines else ''
+                    try:
+                        pos_data = {'pose': {}}
+                        if pos_str:
+                            parts = pos_str.split(';')
+                            if len(parts) < 2:
+                                raise ValueError("Invalid format: missing semicolon")
+                            data_str = parts[1]
+                            pairs = data_str.split(', ')
+                            for pair in pairs:
+                                key, value = pair.split(':')
+                                key = key.strip("'")
+                                if key in ['equity', 'imbalance']:
+                                    continue
+                                pos_data['pose'][key] = {'quantity': float(value)}
+                        self.account_positions_from_bot[session][account_key] = pos_data
+                        logger.info(f'Parsed exchange positions for {account_key} from bot')
+                    except Exception as e:
+                        logger.error(f'Error parsing exchange positions from {actual_pos_file}: {str(e)}')
+                        self.account_positions_from_bot[session][account_key] = {'pose': {}}
                 strategy_positions = []
                 for strategy_name, (strat_exchange, strat_account) in accounts.items():
                     if strat_account == account and strat_exchange == trade_exchange:
                         strategy_dir = os.path.join(working_directory, strategy_name)
                         state_file = os.path.join(strategy_dir, 'current_state.json')
-                        if os.path.exists(state_file):
-                            async with aiofiles.open(state_file, 'r') as f:
-                                try:
-                                    content = await f.read()
-                                    state = json.loads(content)
-                                    if not isinstance(state, dict):
-                                        logger.error(f'Invalid JSON in {state_file}: expected dict, got {type(state)}')
-                                        strategy_positions.append({})
-                                    else:
-                                        strategy_positions.append(state)
-                                        logger.info(f'Read valid current_state.json for {strategy_name}')
-                                except Exception as e:
-                                    logger.error(f'Error reading {state_file}: {e}')
-                                    strategy_positions.append({})
-                        else:
-                            logger.warning(f'No current_state.json for {strategy_name} in {strategy_dir}')
+                        if not os.path.exists(state_file):
+                            logger.warning(f'State file {state_file} does not exist')
                             strategy_positions.append({})
-                logger.info(f'strategy_positions for {account_key}: type={type(strategy_positions)}')
+                            continue
+                        async with aiofiles.open(state_file, 'r') as f:
+                            try:
+                                content = await f.read()
+                                state = json.loads(content)
+                                if not isinstance(state, dict):
+                                    logger.error(f'Invalid JSON in {state_file}: expected dict, got {type(state)}')
+                                    strategy_positions.append({})
+                                else:
+                                    strategy_positions.append(state)
+                                    logger.info(f'Read valid current_state.json for {strategy_name}')
+                            except Exception as e:
+                                logger.error(f'Error reading {state_file}: {str(e)}')
+                                strategy_positions.append({})
                 try:
                     aggregated_theo = await aggregate_theo_positions(strategy_positions)
                     self.account_positions_theo_from_bot[session][account_key] = aggregated_theo
-                    logger.info(f'Aggregated positions for {account_key}: {aggregated_theo}')
+                    logger.info(f'Aggregated positions for {account_key}')
                 except Exception as e:
-                    logger.error(f'Error aggregating theoretical positions for {account_key}: {e}')
+                    logger.error(f'Error aggregating theoretical positions for {account_key}: {str(e)}')
                     self.account_positions_theo_from_bot[session][account_key] = {}
-        return
 
     async def update_current_state(self):
         logger.info(f'Updating strat states')
@@ -645,32 +656,41 @@ class Processor:
         return messages
 
     async def check_multistrategy_position(self):
-        """Compare aggregated theoretical and actual positions for all accounts, return JSON for web app."""
-        self.multistrategy_matching = {}
+        """Compare aggregated theoretical and actual positions for all accounts, update self.multistrategy_matching, return messages."""
         messages = []
+        self.multistrategy_matching = {}
         for session in self.account_positions_theo_from_bot:
+            matching_threshold = self.session_matching_configs[session]['tolerance_threshold']
+            self.multistrategy_matching[session] = {}
             for session_key in self.account_positions_theo_from_bot[session]:
                 try:
+                    logger.info(f"Processing multistrategy position for {session}:{session_key}")
                     theo_positions = self.account_positions_theo_from_bot.get(session, {}).get(session_key, {}).get('pose', {})
                     real_positions = self.account_positions_from_bot.get(session, {}).get(session_key, {}).get('pose', {})
-                    result = compare_positions(theo_positions, real_positions, session_key)
-                    self.multistrategy_matching[session_key] = result
-                    logger.info(f"Multistrategy position comparison for {session}:{session_key}: {result}")
+                    if not theo_positions or not real_positions:
+                        logger.warning(f"Empty positions for {session}:{session_key} - theo: {theo_positions}, real: {real_positions}")
+                        self.multistrategy_matching[session][session_key] = {}
+                        continue
+                    result = compare_positions(theo_positions, real_positions, session_key, matching_threshold)
+                    self.multistrategy_matching[session][session_key] = result
                     for token, data in result.items():
                         if not data['matching']:
                             messages.append(
-                                f"Alert: Asset {token} in {session_key} has quantity mismatch. "
-                                f"Theoretical qty: {data['theo_qty']}, Real qty: {data['real_qty']}"
+                                f"** QUANTITY MISMATCH **  \n"
+                                f"Asset {token} in {session_key} has quantity mismatch. \n"
+                                f"Theoretical qty: {data['theo_qty']}, Real qty: {data['real_qty']} \n"
                                 f"{', executing: True' if data['executing'] else ''}."
                             )
                 except Exception as e:
                     logger.error(f'Exception {e} during multistrategy position comparison for {session}:{session_key}')
-                    self.multistrategy_matching[session_key] = {}
-        return self.multistrategy_matching, messages
+                    logger.error(traceback.format_exc())
+                    self.multistrategy_matching[session][session_key] = {}
+        logger.info(f"Updated multistrategy_matching: {self.multistrategy_matching.keys()}")
+        return messages
 
     async def fetch_token_prices(self, exchange, tokens):
         """Fetch current prices for a list of tokens from the exchange."""
-        logger.info(f"Fetching prices for tokens {tokens} on exchange {exchange}")
+        logger.info("Fetching token prices")
         if 'ok' in exchange:
             exchange_name = 'okexfut'
         elif 'bin' in exchange and 'fut' in exchange:
@@ -692,11 +712,9 @@ class Processor:
         prices = {token: None for token in tokens}
         try:
             symbol_map = {token: token for token in tokens}
-            logger.info(f"Symbol map: {symbol_map}")
             async def fetch_ticker(symbol):
                 try:
                     ticker = await end_point._exchange_async.fetch_ticker(symbol)
-                    logger.info(f"Raw ticker for {symbol}: {ticker}")
                     return symbol, ticker.get('last', None)
                 except Exception as e:
                     logger.warning(f"Error fetching price for {symbol} on {exchange_name}: {str(e)}")
@@ -704,14 +722,13 @@ class Processor:
             
             tasks = [fetch_ticker(symbol) for symbol in set(symbol_map.values())]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            logger.info(f"Fetch ticker results: {results}")
             
             symbol_prices = {symbol: price for symbol, price in results if not isinstance(price, Exception)}
             for token, symbol in symbol_map.items():
                 price = symbol_prices.get(symbol)
                 prices[token] = price
                 if price is not None:
-                    logger.info(f"Fetched price for {token} ({symbol}) on {exchange_name}: {price}")
+                    continue
                 else:
                     logger.warning(f"No 'last' price in ticker for {token} ({symbol}) on {exchange_name}")
             
@@ -726,30 +743,27 @@ class Processor:
             return prices
 
     async def get_multistrategy_position_details(self, session, account_key):
-        """Fetch detailed position data with prices and strategy counts for visualization."""
+        """Fetch detailed position data with prices and strategy counts from self.multistrategy_matching."""
         logger.info(f"Starting get_multistrategy_position_details for {session}:{account_key}")
         try:
-            # Get aggregated theoretical and real positions
-            theo_positions = self.account_positions_theo_from_bot.get(session, {}).get(account_key, {}).get('pose', {})
-            real_positions = self.account_positions_from_bot.get(session, {}).get(account_key, {}).get('pose', {})
-            logger.info(f"Theo positions: {theo_positions}")
-            logger.info(f"Real positions: {real_positions}")
-            
+            # Get precomputed matching data
+            matching_data = self.multistrategy_matching.get(session, {}).get(account_key, {})
+            if not matching_data:
+                logger.warning(f"No matching data for {session}:{account_key}")
+                return {}
+
             # Count strategies contributing to each token
             strategy_counts = {}
             working_directory = self.session_configs[session]['working_directory']
-            logger.info(f"Working directory: {working_directory}")
             for strategy_name, (strat_exchange, strat_account) in self.used_accounts[session].items():
                 if f"{strat_exchange}_{strat_account}" == account_key:
                     strategy_dir = os.path.join(working_directory, strategy_name)
                     state_file = os.path.join(strategy_dir, 'current_state.json')
-                    logger.info(f"Checking state file: {state_file}")
                     if os.path.exists(state_file):
                         async with aiofiles.open(state_file, 'r') as f:
                             try:
                                 content = await f.read()
                                 state = json.loads(content)
-                                logger.info(f"Read state for {strategy_name}: {state.keys()}")
                                 if 'current_coin_info' in state:
                                     for coin, coin_info in state['current_coin_info'].items():
                                         if coin_info.get('quantity', 0) != 0:
@@ -769,29 +783,28 @@ class Processor:
             
             # Fetch current prices for all tokens
             exchange, _ = account_key.split('_')
-            tokens = set(list(theo_positions.keys()) + list(real_positions.keys()))
-            logger.info(f"Fetching prices for tokens: {tokens}")
-            quotes = await self.fetch_token_prices(exchange, list(tokens))
-            logger.info(f"Fetched quotes: {quotes}")
+            tokens = list(matching_data.keys())
+            quotes = await self.fetch_token_prices(exchange, tokens)
 
             # Build detailed result with amounts
             result = {}
             for token in tokens:
-                theo_qty = theo_positions.get(token, {}).get('quantity', 0.0)
-                real_qty = real_positions.get(token, {}).get('quantity', 0.0)
+                data = matching_data.get(token, {})
+                theo_qty = data.get('theo_qty', 0.0)
+                real_qty = data.get('real_qty', 0.0)
                 price = quotes.get(token, None)
                 theo_amount = theo_qty * price if price is not None else None
                 real_amount = real_qty * price if price is not None else None
-                matching = abs(theo_qty - real_qty) < 1e-6
                 result[token] = {
+                    'theo_qty': theo_qty,
+                    'real_qty': real_qty,
                     'theo_amount': theo_amount,
                     'real_amount': real_amount,
                     'ref_price': price,
-                    'executing': False,
-                    'matching': matching,
+                    'executing': data.get('executing', False),
+                    'matching': data.get('matching', True),
                     'strategy_count': strategy_counts.get(token, 0)
                 }
-            logger.info(f"Detailed positions for {session}:{account_key}: {result}")
             return result
         except Exception as e:
             logger.error(f"Exception in get_multistrategy_position_details for {session}:{account_key}: {str(e)}")
@@ -833,9 +846,6 @@ class Processor:
             return self.matching[exchange][strat]
         else:
             return None
-
-    def get_multistrategy_matching(self):
-        return self.multistrategy_matching
 
     async def get_account_position(self, exchange, account):
         if 'ok' in exchange:
@@ -1013,16 +1023,112 @@ def runner(event, processor, pace):
                     return HTMLResponse(report)
                 else:
                     return HTMLResponse('N/A')
-        @app.get('/multistrategy_matching')
-        async def read_multistrategy_matching():
-            async with aiohttp.ClientSession() as session:
-                report, _ = await processor.check_multistrategy_position()
-            return JSONResponse(report)
         @app.get('/multistrategy_position_details')
         async def read_multistrategy_position_details(session: str = 'bitget', account_key: str = 'bitget_2'):
-            async with aiohttp.ClientSession() as http_session:
-                report = await processor.get_multistrategy_position_details( session, account_key)
+            report = await processor.get_multistrategy_position_details(session, account_key)
+            if not report:
+                raise HTTPException(status_code=404, detail=f"No data for {session}:{account_key}")
             return JSONResponse(report)
+        @app.get("/multistrat_summary/{account_or_strategy}/{timeframe}")
+        async def get_multistrat_summary(account_or_strategy: str, timeframe: str):
+            """Endpoint to get PnL summary and plot data for an account or strategy."""
+            try:
+                # Validate timeframe
+                timeframe_days = {"1d": 1, "3d": 3, "7d": 7, "30d": 30, "90d": 90}
+                if timeframe not in timeframe_days:
+                    raise HTTPException(status_code=400, detail="Invalid timeframe. Use: 1d, 3d, 7d, 30d, 90d")
+                days = timeframe_days[timeframe]
+                start_time = datetime.now(UTC) - timedelta(days=days)
+                end_time = datetime.now(UTC)
+
+                # Determine if input is account or strategy
+                accounts = []
+                strategies = []
+                for session, session_params in processor.session_configs.items():
+                    accounts.extend([str(params['account_trade']) for params in session_params['strategy'].values() if params.get('active', False)])
+                    strategies.extend([strat_name for strat_name, params in session_params['strategy'].items() if params.get('active', False)])
+                accounts = list(set(accounts))
+                is_account = account_or_strategy in accounts
+                entity = account_or_strategy
+                if not (is_account or account_or_strategy in strategies):
+                    raise HTTPException(status_code=404, detail=f"Entity {entity} not found")
+
+                # Load PnL snapshots
+                snapshot_dir = Path("C:/Users/Z640/dev/position-comparator/microservice/output_bitget/pnl_snapshots")
+                theo_data = []
+                real_data = []
+                for file in snapshot_dir.glob(f"pnl_*_snapshot_{entity}_*.json"):
+                    timestamp_str = file.stem.split('_')[-1]
+                    try:
+                        timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
+                        if start_time <= timestamp <= end_time:
+                            async with aiofiles.open(file, 'r') as f:
+                                data = await f.read()
+                                data = json.loads(data)
+                            if "theo" in file.stem:
+                                theo_data.append((timestamp, data))
+                            else:
+                                real_data.append((timestamp, data))
+                    except ValueError:
+                        logger.warning(f"Invalid timestamp in filename: {file}")
+                        continue
+
+                # Aggregate PnL data
+                theo_timestamps = []
+                theo_realized_pnl = []
+                theo_unrealized_pnl = []
+                real_timestamps = []
+                real_pnl = []
+
+                for ts, data in sorted(theo_data, key=lambda x: x[0]):
+                    key = f"account_{entity}" if is_account else entity
+                    for ts_str, entry in data.get(key, {}).items():
+                        try:
+                            ts_dt = datetime.strptime(ts_str, "%Y/%m/%d %H:%M:%S.%f").replace(tzinfo=UTC)
+                            if start_time <= ts_dt <= end_time:
+                                theo_timestamps.append(ts_dt)
+                                theo_realized_pnl.append(entry.get("portfolio_realized_pnl", 0))
+                                theo_unrealized_pnl.append(entry.get("portfolio_unrealized_pnl", 0))
+                        except ValueError:
+                            logger.warning(f"Invalid timestamp in theo data: {ts_str}")
+                            continue
+
+                for ts, data in sorted(real_data, key=lambda x: x[0]):
+                    key = f"account_{entity}" if is_account else entity
+                    for ts_str, entry in data.get(key, {}).items():
+                        try:
+                            ts_dt = datetime.strptime(ts_str, "%Y/%m/%d %H:%M:%S.%f").replace(tzinfo=UTC)
+                            if start_time <= ts_dt <= end_time:
+                                real_timestamps.append(ts_dt)
+                                real_pnl.append(entry.get("cumulative_usd_pnl", 0))
+                        except ValueError:
+                            logger.warning(f"Invalid timestamp in real data: {ts_str}")
+                            continue
+
+                # Compute average PnL by trade (placeholder, replace with your logic)
+                avg_pnl = {"normal": 0.0, "account_weighted": 0.0} if is_account else {}
+
+                # Prepare response
+                response = {
+                    "entity": entity,
+                    "is_account": is_account,
+                    "timeframe": timeframe,
+                    "theo_pnl": {
+                        "timestamps": [ts.strftime("%Y-%m-%d %H:%M:%S.%f") for ts in theo_timestamps],
+                        "realized_pnl": theo_realized_pnl,
+                        "unrealized_pnl": theo_unrealized_pnl
+                    },
+                    "real_pnl": {
+                        "timestamps": [ts.strftime("%Y-%m-%d %H:%M:%S.%f") for ts in real_timestamps],
+                        "cumulative_pnl": real_pnl
+                    },
+                    "avg_pnl": avg_pnl
+                }
+                return JSONResponse(response)
+            except Exception as e:
+                logger.error(f"Error in multistrat_summary for {account_or_strategy}: {str(e)}")
+                logger.error(traceback.format_exc())
+                raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
         ports = [14440, 14441, 14442]
         server = None
         for port in ports:
