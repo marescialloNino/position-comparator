@@ -18,7 +18,7 @@ import argparse
 
 from data_analyzer.calculate_theoretical_pnl import compute_pnl_timeline, load_portfolios
 from data_analyzer.calculate_real_pnl import compute_real_pnl_timeline
-from common.paths import OUTPUT_DIR, CONFIG_FILE, LOG_DIR
+from paths import DATA_DIR, LOG_DIR
 
 # Configure logging
 LOG_DIR.mkdir(parents=True, exist_ok=True)
