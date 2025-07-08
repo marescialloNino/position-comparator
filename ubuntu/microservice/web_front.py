@@ -1,4 +1,3 @@
-
 import os
 import argparse
 import yaml
@@ -38,36 +37,42 @@ def dict_to_df(data_dict, mode=True):
 def multistrategy_matching_to_df(details_dict):
     """
     Convert multistrategy position details JSON to a main DataFrame and a summary DataFrame for exposures.
+    Excludes positions marked as dust (is_dust: True) from the main DataFrame.
     :param details_dict: Dictionary from /multistrategy_position_details endpoint.
-    :return: Tuple of (main DataFrame, summary DataFrame) with main_df columns token, theo_qty, real_qty, theo_amount, real_amount, ref_price, executing, matching, strategy_count, and summary_df with columns Net Exposure, Gross Exposure and rows Theo, Real.
+    :return: Tuple of (main DataFrame, summary DataFrame) with main_df columns token, theo_amount, real_amount, ref_price, executing, matching, strategy_count, is_dust, is_mismatch, and summary_df with columns Net Exposure, Gross Exposure and rows Theo, Real.
     """
     try:
         # Create main DataFrame
         main_df = pd.DataFrame.from_dict(details_dict, orient='index')
         main_df.reset_index(inplace=True)
         main_df.rename(columns={'index': 'token'}, inplace=True)
-        main_df = main_df[['token', 'theo_qty', 'real_qty', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count']]
+        main_df = main_df[['token', 'theo_qty', 'real_qty', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count', 'is_dust', 'is_mismatch','mismatch_count']]
         main_df['theo_amount'] = main_df['theo_amount'].fillna(0).astype(int)
         main_df['real_amount'] = main_df['real_amount'].fillna(0).astype(int)
         main_df['ref_price'] = main_df['ref_price'].fillna(0.0)
         main_df['strategy_count'] = main_df['strategy_count'].fillna(0).astype(int)
+        main_df['is_dust'] = main_df['is_dust'].fillna(False)
+        main_df['is_mismatch'] = main_df['is_mismatch'].fillna(False)
         
-        # Create summary DataFrame
+        # Create summary DataFrame (includes all positions, even dust)
         summary_df = pd.DataFrame({
             'Net Exposure': [int(main_df['theo_amount'].sum()), int(main_df['real_amount'].sum())],
             'Gross Exposure': [int(main_df['theo_amount'].abs().sum()), int(main_df['real_amount'].abs().sum())]
         }, index=['Theo', 'Real'])
         
+        # Filter out dust positions from main DataFrame
+        main_df = main_df[~main_df['is_dust']]
+        main_df = main_df[['token','theo_amount', 'real_amount', 'executing', 'matching', 'strategy_count','mismatch_count']]
+        
         return main_df, summary_df
     except Exception as e:
         print(f"Error converting multistrategy matching data: {e}")
-        main_df = pd.DataFrame(columns=['token', 'theo_qty', 'real_qty', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count'])
+        main_df = pd.DataFrame(columns=['token','theo_amount', 'real_amount', 'executing', 'matching', 'strategy_count','mismatch_count'])
         summary_df = pd.DataFrame({
             'Net Exposure': [0, 0],
             'Gross Exposure': [0, 0]
         }, index=['Theo', 'Real'])
         return main_df, summary_df
-
 
 def status_req(account):
     uri = GATEWAY + '/status'
@@ -170,8 +175,6 @@ def pnl_req():
         with use_scope('pnl_rez'):
             put_text(f"Error: PnL endpoint returned status {response.status_code}: {response.text}")
 
-
-
 def multistrategy_matching_req(account):
     exchange, account = account.split(':')
     session_name = exchange.replace('_fut', '')
@@ -199,8 +202,11 @@ def multistrategy_matching_req(account):
         return
     
     main_df, summary_df = multistrategy_matching_to_df(details_dict)
-    main_df = main_df[['token', 'theo_amount', 'real_amount', 'executing', 'matching', 'strategy_count']]
-    main_df = main_df.sort_values(by='theo_amount', key=abs, ascending=False)
+    main_df = main_df.sort_values(by='theo_amount', ascending=False)
+    
+    # Log the number of dust positions filtered
+    dust_count = len(details_dict) - len(main_df)
+    print(f"Filtered {dust_count} dust positions for {session_name}:{account_key}")
     
     # Custom formatter for ref_price: 2 decimals if >= 1, 3 significant figures if < 1
     def format_ref_price(x):
@@ -220,17 +226,21 @@ def multistrategy_matching_req(account):
                 'Gross Exposure': lambda x: f'{x:.0f}' if pd.notna(x) else 'N/A'
             },
             classes='card',
-            index=True
+            index=False
         ))
         put_html('<br>')  # Add spacing between summary and main table
-        # Display main table
+        # Display main table (dust positions already excluded)
         put_html(main_df.to_html(
             formatters={
                 'theo_amount': lambda x: f'{x:.0f}' if pd.notna(x) else 'N/A',
                 'real_amount': lambda x: f'{x:.0f}' if pd.notna(x) else 'N/A',
-                'strategy_count': lambda x: f'{x:d}'
+                'ref_price': format_ref_price,
+                'strategy_count': lambda x: f'{x:d}',
+                'is_dust': lambda x: str(x),
+                'is_mismatch': lambda x: str(x)
             },
-            classes='card'
+            classes='card',
+            index=False
         ))
         put_html('</div>')
 

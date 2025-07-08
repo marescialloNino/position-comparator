@@ -1,10 +1,11 @@
 working_directory: ../microservice/
 pace:
-  REFRESH: 30
-  PNL: 30
-  POS: 30
+  REFRESH: 600
+  PNL: 1800
+  POS: 600
   RUNNING: 30
-  MULTI: 60
+  MULTI: 30
+  PRICE_UPDATE: 600
 session:
   bitget:
     config_file: ../microservice/config/config_pair_session_bitget.json

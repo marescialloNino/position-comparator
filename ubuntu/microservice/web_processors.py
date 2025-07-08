@@ -1,9 +1,9 @@
-
 from fastapi import FastAPI, HTTPException
 from pathlib import Path
 from datetime import datetime, timedelta, timezone as UTC
 import json
 import pandas as pd
+import time
 import sys
 import traceback
 import matplotlib.pyplot as plt
@@ -29,11 +29,12 @@ from datafeed.broker_handler import BrokerHandler
 from web_broker import WebSpreaderBroker
 from reporting.bot_reporting import TGMessenger
 from data_analyzer.position_comparator import compare_positions
+from paths import LOG_DIR
 
 # Set up module-level logger
 logger = logging.getLogger(__name__)
 fmt = logging.Formatter('{asctime}:{levelname}:{name}:{message}', style='{')
-handler = TimedRotatingFileHandler(filename='output/web_processor.log',
+handler = TimedRotatingFileHandler(filename=LOG_DIR  / 'web_processor.log',
                                    when="midnight", interval=1, backupCount=7)
 handler.setFormatter(fmt)
 logger.setLevel(logging.INFO)
@@ -48,7 +49,8 @@ SignalType = Enum('SignalType', [('STOP', 'stop'),
                                  ('RUNNING', 'check_running'),
                                  ('FILE', 'update_file'),
                                  ('MULTI', 'update_account_multi'),
-                                 ('MULTI_POS', 'check_multistrategy_position')])
+                                 ('MULTI_POS', 'check_multistrategy_position'),
+                                 ('PRICE_UPDATE', 'update_prices')])
 
 def last_modif(hearbeat_file):
     if os.path.exists(hearbeat_file):
@@ -99,7 +101,6 @@ class Processor:
         self.session_config = config['session']
         self.config_files = {session: self.session_config[session]['config_file'] for session in self.session_config}      
         self.config_position_matching_files = {session: self.session_config[session]['config_position_matching_file'] for session in self.session_config}
-        
         self.session_configs = {}
         for session, config_file in self.config_files.items():
             if os.path.exists(config_file):
@@ -131,6 +132,10 @@ class Processor:
         self.last_message = []
         self.used_accounts = {}
         self.last_running_alert = {}  # Cache for last sent running alerts
+        self.price_cache = {}  # {exchange: {token: {'price': float, 'timestamp': datetime}}}
+        self.median_position_sizes = {}  # {exchange: float}
+        self.last_price_update = {}  # {exchange: datetime}
+        self.mismatch_counts = {}  # {session_key: {asset: int}} for tracking consecutive mismatches
         self._update_accounts_by_strat()
 
     def _update_accounts_by_strat(self):
@@ -229,26 +234,6 @@ class Processor:
                 except Exception as e:
                     logger.error(f'Error aggregating theoretical positions for {account_key}: {str(e)}')
                     self.account_positions_theo_from_bot[session][account_key] = {}
-
-    async def update_current_state(self):
-        logger.info(f'Updating strat states')
-        for session, accounts in self.used_accounts.items():
-            working_directory = self.session_configs[session]['working_directory']
-            strategies = self.session_configs[session]['strategy']
-            for strategy_name, exchange_account in accounts.items():
-                logger.info(f'Updating current state for {strategy_name}')
-                strategy_directory = os.path.join(working_directory, strategy_name)
-                strategy_param = strategies[strategy_name]
-                persistence_file = os.path.join(strategy_directory, strategy_param['persistence_file'])
-                if os.path.exists(persistence_file):
-                    async with aiofiles.open(persistence_file, mode='r') as myfile:
-                        content = await myfile.read()
-                    state = json.loads(content)
-                else:
-                    state = {}
-                if session not in self.strategy_state:
-                    self.strategy_state[session] = {}
-                self.strategy_state[session][strategy_name] = state
 
     async def update_pnl(self, exchange, working_directory, strategy_name, strategy_param):
         logger.info('updating pnl for %s, %s', exchange, strategy_name)
@@ -534,6 +519,24 @@ class Processor:
         except Exception as e:
             logger.warning(f'Exception {e.args[0]} during update_summary of account {exchange}.{strategy_name}')
 
+    async def refresh(self):
+        logger.info('refreshing')
+        for exchange, params in self.session_configs.items():
+            working_directory = params['working_directory']
+            strategies = params['strategy']
+            self.summaries[exchange] = {'exchange': params['exchange']}
+            for strategy_name in strategies:
+                strategy_param = strategies[strategy_name]
+                if strategy_param['active']:
+                    try:
+                        await self.update_summary(exchange, working_directory, strategy_name, strategy_param)
+                        await self.update_pnl(exchange, working_directory, strategy_name, strategy_param)
+                        
+                    except Exception as e:
+                        logger.error(f'exception {e.args[0]} for {exchange}/{strategy_name}')
+                        logger.error(traceback.format_exc())
+        await self.build_dashboard()
+
     async def update_account(self, exchange, strategy_name, strategy_param):
         destination = strategy_param['send_orders']
         logger.info('updating account for %s, %s', exchange, strategy_name)
@@ -655,42 +658,9 @@ class Processor:
                     logger.error(f'Exception {e.args[0]} during check of {strat}@{exchange}')
         return messages
 
-    async def check_multistrategy_position(self):
-        """Compare aggregated theoretical and actual positions for all accounts, update self.multistrategy_matching, return messages."""
-        messages = []
-        self.multistrategy_matching = {}
-        for session in self.account_positions_theo_from_bot:
-            matching_threshold = self.session_matching_configs[session]['tolerance_threshold']
-            self.multistrategy_matching[session] = {}
-            for session_key in self.account_positions_theo_from_bot[session]:
-                try:
-                    logger.info(f"Processing multistrategy position for {session}:{session_key}")
-                    theo_positions = self.account_positions_theo_from_bot.get(session, {}).get(session_key, {}).get('pose', {})
-                    real_positions = self.account_positions_from_bot.get(session, {}).get(session_key, {}).get('pose', {})
-                    if not theo_positions or not real_positions:
-                        logger.warning(f"Empty positions for {session}:{session_key} - theo: {theo_positions}, real: {real_positions}")
-                        self.multistrategy_matching[session][session_key] = {}
-                        continue
-                    result = compare_positions(theo_positions, real_positions, session_key, matching_threshold)
-                    self.multistrategy_matching[session][session_key] = result
-                    for token, data in result.items():
-                        if not data['matching']:
-                            messages.append(
-                                f"** QUANTITY MISMATCH **  \n"
-                                f"Asset {token} in {session_key} has quantity mismatch. \n"
-                                f"Theoretical qty: {data['theo_qty']}, Real qty: {data['real_qty']} \n"
-                                f"{', executing: True' if data['executing'] else ''}."
-                            )
-                except Exception as e:
-                    logger.error(f'Exception {e} during multistrategy position comparison for {session}:{session_key}')
-                    logger.error(traceback.format_exc())
-                    self.multistrategy_matching[session][session_key] = {}
-        logger.info(f"Updated multistrategy_matching: {self.multistrategy_matching.keys()}")
-        return messages
-
     async def fetch_token_prices(self, exchange, tokens):
         """Fetch current prices for a list of tokens from the exchange."""
-        logger.info("Fetching token prices")
+        logger.info(f"Fetching token prices for {exchange}: {tokens}")
         if 'ok' in exchange:
             exchange_name = 'okexfut'
         elif 'bin' in exchange and 'fut' in exchange:
@@ -728,7 +698,10 @@ class Processor:
                 price = symbol_prices.get(symbol)
                 prices[token] = price
                 if price is not None:
-                    continue
+                    if exchange not in self.price_cache:
+                        self.price_cache[exchange] = {}
+                    self.price_cache[exchange][token] = {'price': price, 'timestamp': datetime.utcnow()}
+                    logger.info(f"Updated price cache for {exchange}:{token} = {price}")
                 else:
                     logger.warning(f"No 'last' price in ticker for {token} ({symbol}) on {exchange_name}")
             
@@ -742,8 +715,68 @@ class Processor:
             await bh.close_exchange_async()
             return prices
 
+    async def update_prices_and_median(self):
+        """Fetch token prices for all tokens in a session at once and compute median position sizes per session_key."""
+        logger.info("Updating prices and median position sizes")
+        try:
+            # Initialize price cache and median position sizes
+            self.price_cache = {}
+            self.median_position_sizes = {}
+
+            # Iterate over sessions
+            for session in self.session_configs:
+                exchange = session
+                if exchange not in self.price_cache:
+                    self.price_cache[exchange] = {}
+                
+                # Collect all tokens for the session
+                tokens = set()
+                for session_key in self.account_positions_from_bot.get(session, {}):
+                    for token in self.account_positions_from_bot[session].get(session_key, {}).get('pose', {}):
+                        tokens.add(token)
+                
+                # Fetch prices for all tokens at once
+                try:
+                    token_prices = await self.fetch_token_prices(exchange, list(tokens))  # Pass list of tokens
+                    for token, price in token_prices.items():
+                        if price is not None:
+                            self.price_cache[exchange][token] = {'price': price, 'timestamp': datetime.utcnow()}
+                            logger.debug(f"Fetched price for {exchange}:{token} = {price}")
+                        else:
+                            logger.warning(f"Failed to fetch price for {exchange}:{token}")
+                except Exception as e:
+                    logger.error(f"Error fetching prices for {exchange}: {str(e)}")
+                    for token in tokens:
+                        self.price_cache[exchange][token] = {'price': None, 'timestamp': datetime.utcnow()}
+                        logger.warning(f"Set price to None for {exchange}:{token} due to fetch error")
+                
+                # Compute median position size per session_key
+                for session_key in self.account_positions_from_bot.get(session, {}):
+                    amounts = []
+                    for token, pos in self.account_positions_from_bot[session].get(session_key, {}).get('pose', {}).items():
+                        qty = pos.get('quantity', 0)
+                        price = self.price_cache[exchange].get(token, {}).get('price')
+                        if price is not None and qty != 0:
+                            amount = abs(qty * price)
+                            if amount > 100:  # Filter out small amounts
+                                amounts.append(amount)
+                    
+                    # Calculate median position size
+                    if amounts:
+                        median_size = np.median(amounts)
+                        self.median_position_sizes[session_key] = median_size
+                        logger.info(f"Median position size for {session_key}: {median_size:.2f} USD")
+                    else:
+                        self.median_position_sizes[session_key] = 0
+                        logger.warning(f"No valid amounts for median calculation for {session_key}")
+                
+                self.last_price_update[exchange] = datetime.utcnow()
+        except Exception as e:
+            logger.error(f"Error in update_prices_and_median: {str(e)}")
+            logger.error(traceback.format_exc())
+
     async def get_multistrategy_position_details(self, session, account_key):
-        """Fetch detailed position data with prices and strategy counts from self.multistrategy_matching."""
+        """Fetch detailed position data with prices and strategy counts from self.multistrategy_matching using cached prices."""
         logger.info(f"Starting get_multistrategy_position_details for {session}:{account_key}")
         try:
             # Get precomputed matching data
@@ -780,21 +813,48 @@ class Processor:
                                 logger.error(traceback.format_exc())
                     else:
                         logger.warning(f"State file {state_file} does not exist")
-            
-            # Fetch current prices for all tokens
-            exchange, _ = account_key.split('_')
-            tokens = list(matching_data.keys())
-            quotes = await self.fetch_token_prices(exchange, tokens)
 
-            # Build detailed result with amounts
+            # Ensure price cache is fresh (not older than 10 minutes)
+            exchange = account_key.split('_')[0]
+            tokens = list(matching_data.keys())
+            current_time = datetime.utcnow()
+            prices = {}
+            
+            # Initialize price cache for exchange if not exists
+            if exchange not in self.price_cache:
+                self.price_cache[exchange] = {}
+            if exchange not in self.last_price_update:
+                self.last_price_update[exchange] = datetime.min.replace(tzinfo=UTC)
+
+            # Refresh prices if cache is stale
+            if (current_time - self.last_price_update[exchange]).total_seconds() > 600:
+                logger.info(f"Price cache for {exchange} is stale, refreshing")
+                await self.update_prices_and_median()
+
+            # Use cached prices
+            for token in tokens:
+                if token in self.price_cache[exchange]:
+                    prices[token] = self.price_cache[exchange][token]['price']
+                    logger.debug(f"Using cached price for {exchange}:{token} = {prices[token]}")
+                else:
+                    prices[token] = None
+                    logger.warning(f"No cached price available for {exchange}:{token}")
+
+            # Build detailed result with amounts and dust/mismatch status
             result = {}
+            median_size = self.median_position_sizes.get(account_key, 0)  # Use session_key instead of exchange
             for token in tokens:
                 data = matching_data.get(token, {})
                 theo_qty = data.get('theo_qty', 0.0)
                 real_qty = data.get('real_qty', 0.0)
-                price = quotes.get(token, None)
+                price = prices.get(token)
                 theo_amount = theo_qty * price if price is not None else None
                 real_amount = real_qty * price if price is not None else None
+                strategy_count = strategy_counts.get(token, 0)
+                is_dust = data.get('is_dust', False)
+                is_mismatch = data.get('is_mismatch', False)
+                mismatch_count = data.get('mismatch_count', 0)
+
                 result[token] = {
                     'theo_qty': theo_qty,
                     'real_qty': real_qty,
@@ -803,49 +863,84 @@ class Processor:
                     'ref_price': price,
                     'executing': data.get('executing', False),
                     'matching': data.get('matching', True),
-                    'strategy_count': strategy_counts.get(token, 0)
+                    'strategy_count': strategy_count,
+                    'is_dust': is_dust,
+                    'is_mismatch': is_mismatch,
+                    'mismatch_count': mismatch_count
                 }
             return result
         except Exception as e:
             logger.error(f"Exception in get_multistrategy_position_details for {session}:{account_key}: {str(e)}")
             logger.error(traceback.format_exc())
             return {}
+        
+    async def check_multistrategy_position(self):
+        """Compare aggregated theoretical and actual positions for all accounts, update self.multistrategy_matching, return messages."""
+        messages = []
+        self.multistrategy_matching = {}
+        for session in self.account_positions_theo_from_bot:
+            matching_threshold = self.session_matching_configs[session]['tolerance_threshold']
+            self.multistrategy_matching[session] = {}
+            for session_key in self.account_positions_theo_from_bot[session]:
+                try:
+                    logger.info(f"Processing multistrategy position for {session}:{session_key}")
+                    theo_positions = self.account_positions_theo_from_bot.get(session, {}).get(session_key, {}).get('pose', {})
+                    real_positions = self.account_positions_from_bot.get(session, {}).get(session_key, {}).get('pose', {})
+                    logger.debug(f"Theo positions for {session}:{session_key}: {theo_positions}")
+                    logger.debug(f"Real positions for {session}:{session_key}: {real_positions}")
+                    if not theo_positions or not real_positions:
+                        logger.warning(f"Empty positions for {session}:{session_key} - theo: {theo_positions}, real: {real_positions}")
+                        self.multistrategy_matching[session][session_key] = {}
+                        continue
+                    # Pass self as processor to compare_positions
+                    result, position_messages = compare_positions(theo_positions, real_positions, session_key, matching_threshold, processor=self)
+                    self.multistrategy_matching[session][session_key] = result
+                    logger.debug(f"Comparison result for {session}:{session_key}: {result}")
+                    # Filter messages based on mismatch_count >= 3
+                    for message in position_messages:
+                        # Extract asset and check mismatch_count from result
+                        asset = message.split('Asset ')[1].split(' in ')[0]
+                        mismatch_count = result.get(asset, {}).get('mismatch_count', 0)
+                        if mismatch_count >= 3:
+                            messages.append(message)
+                except Exception as e:
+                    logger.error(f'Exception {e} during multistrategy position comparison for {session}:{session_key}')
+                    logger.error(traceback.format_exc())
+                    self.multistrategy_matching[session][session_key] = {}
+        
+        # Send filtered messages via TGMessenger
+        for message in messages:
+            try:
+                response = TGMessenger.send_message(message, 'CM', use_telegram=False)
+                if response.get('ok'):
+                    logger.info(f"Sent message to CM: {message}")
+                else:
+                    logger.error(f"Failed to send message to CM: {response}")
+            except Exception as e:
+                logger.error(f"Error sending message to CM: {e}")
+        
+        logger.info(f"Updated multistrategy_matching: {self.multistrategy_matching.keys()}")
+        return messages
 
-    async def refresh(self):
-        logger.info('refreshing')
-        for exchange, params in self.session_configs.items():
-            working_directory = params['working_directory']
-            strategies = params['strategy']
-            self.summaries[exchange] = {'exchange': params['exchange']}
-            for strategy_name in strategies:
+    async def update_current_state(self):
+        logger.info(f'Updating strat states')
+        for session, accounts in self.used_accounts.items():
+            working_directory = self.session_configs[session]['working_directory']
+            strategies = self.session_configs[session]['strategy']
+            for strategy_name, exchange_account in accounts.items():
+                logger.info(f'Updating current state for {strategy_name}')
+                strategy_directory = os.path.join(working_directory, strategy_name)
                 strategy_param = strategies[strategy_name]
-                if strategy_param['active']:
-                    try:
-                        await self.update_summary(exchange, working_directory, strategy_name, strategy_param)
-                        await self.update_pnl(exchange, working_directory, strategy_name, strategy_param)
-                    except Exception as e:
-                        logger.error(f'exception {e.args[0]} for {exchange}/{strategy_name}')
-                        logger.error(traceback.format_exc())
-        await self.build_dashboard()
-
-    def get_status(self):
-        return self.summaries
-
-    def get_dashboard(self, session):
-        return self.dashboard
-
-    def get_pnl(self):
-        return self.pnl
-
-    def get_matching(self, exchange, strat):
-        if exchange not in self.session_config:
-            return f'Exchange not found: try {list(self.session_config.keys())} and strat name'
-        if self.matching is None:
-            return
-        if exchange in self.matching and strat in self.matching[exchange]:
-            return self.matching[exchange][strat]
-        else:
-            return None
+                persistence_file = os.path.join(strategy_directory, strategy_param['persistence_file'])
+                if os.path.exists(persistence_file):
+                    async with aiofiles.open(persistence_file, mode='r') as myfile:
+                        content = await myfile.read()
+                    state = json.loads(content)
+                else:
+                    state = {}
+                if session not in self.strategy_state:
+                    self.strategy_state[session] = {}
+                self.strategy_state[session][strategy_name] = state
 
     async def get_account_position(self, exchange, account):
         if 'ok' in exchange:
@@ -1038,8 +1133,8 @@ def runner(event, processor, pace):
                 if timeframe not in timeframe_days:
                     raise HTTPException(status_code=400, detail="Invalid timeframe. Use: 1d, 3d, 7d, 30d, 90d")
                 days = timeframe_days[timeframe]
-                start_time = datetime.now(UTC) - timedelta(days=days)
-                end_time = datetime.now(UTC)
+                start_time = datetime.utcnow() - timedelta(days=days)
+                end_time = datetime.utcnow()
 
                 # Determine if input is account or strategy
                 accounts = []
@@ -1196,8 +1291,16 @@ def runner(event, processor, pace):
         event.queue = asyncio.Queue()
         task_queue = asyncio.Queue()
         
-        await refresh()
+        # Ensure initial data population with correct order
+        logger.info("Performing initial data population")
+        await processor.update_account_multi()  # Step 1: Collect positions
+        time.sleep(2)  # Ensure positions are collected before fetching prices
+        await processor.update_prices_and_median()  # Step 2: Fetch prices and median sizes
+        time.sleep(2)
+        await processor.check_multistrategy_position()  # Step 3: Perform position comparison with prices
+        
         event.set()
+        
         web_runner = asyncio.create_task(run_web_processor())
         heart_runner = asyncio.create_task(heartbeat(task_queue, pace['REFRESH'], SignalType.REFRESH))
         pnl_runner = asyncio.create_task(heartbeat(task_queue, pace['PNL'], SignalType.PNL))
@@ -1205,6 +1308,7 @@ def runner(event, processor, pace):
         running_runner = asyncio.create_task(heartbeat(task_queue, pace['RUNNING'], SignalType.RUNNING))
         multi_runner = asyncio.create_task(heartbeat(task_queue, pace.get('MULTI', 30), SignalType.MULTI))
         multi_pos_runner = asyncio.create_task(heartbeat(task_queue, pace.get('MULTI_POS', 30), SignalType.MULTI_POS))
+        price_update_runner = asyncio.create_task(heartbeat(task_queue, pace.get('PRICE_UPDATE', 600), SignalType.PRICE_UPDATE))
         file_watcher = asyncio.create_task(watch_file_modifications(task_queue))
         
         while True:
@@ -1221,6 +1325,7 @@ def runner(event, processor, pace):
                     running_runner.cancel()
                     multi_runner.cancel()
                     multi_pos_runner.cancel()
+                    price_update_runner.cancel()
                     file_watcher.cancel()
                     await task_queue.join()
                     break
@@ -1241,6 +1346,9 @@ def runner(event, processor, pace):
                     task.add_done_callback(lambda _: task_queue.task_done())
                 elif item == SignalType.MULTI_POS:
                     task = asyncio.create_task(check(processor.check_multistrategy_position()))
+                    task.add_done_callback(lambda _: task_queue.task_done())
+                elif item == SignalType.PRICE_UPDATE:
+                    task = asyncio.create_task(check(processor.update_prices_and_median()))
                     task.add_done_callback(lambda _: task_queue.task_done())
                 elif isinstance(item, tuple) and item[0] == SignalType.FILE:
                     await processor.update_config(item[1], item[2])
@@ -1265,7 +1373,15 @@ if __name__ == '__main__':
             config = yaml.load(myfile, Loader=yaml.FullLoader)
     else:
         config = {}
-    pace = config.get('pace', {'REFRESH': 180, 'PNL': 1800, 'POS': 600, 'RUNNING': 300, 'MULTI': 30, 'MULTI_POS': 30})
+    pace = config.get('pace', {
+        'REFRESH': 600,
+        'PNL': 1800,
+        'POS': 600,
+        'RUNNING': 300,
+        'MULTI': 30,
+        'MULTI_POS': 30,
+        'PRICE_UPDATE': 600
+    })
     started = threading.Event()
     processor = Processor(config)
     th = threading.Thread(target=runner, args=(started, processor, pace,))
