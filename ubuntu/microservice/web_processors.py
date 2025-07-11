@@ -135,7 +135,7 @@ class Processor:
         self.price_cache = {}  # {exchange: {token: {'price': float, 'timestamp': datetime}}}
         self.median_position_sizes = {}  # {exchange: float}
         self.last_price_update = {}  # {exchange: datetime}
-        self.mismatch_counts = {}  # {session_key: {asset: int}} for tracking consecutive mismatches
+        self.mismatch_start_times = {}  # {session_key: {asset: int}} for tracking mismatches
         self._update_accounts_by_strat()
 
     def _update_accounts_by_strat(self):
@@ -239,7 +239,7 @@ class Processor:
     async def update_pnl(self, exchange, working_directory, strategy_name, strategy_param):
         logger.info('updating pnl for %s, %s', exchange, strategy_name)
         tz_string = datetime.now().astimezone().tzinfo
-        now = pd.Timestamp(datetime.today()).tz_localize(tz_string).tz_convert('UTC')
+        now = datetime.utcnow()
         strategy_directory = os.path.join(working_directory, strategy_name)
         pnl_file = os.path.join(strategy_directory, 'pnl.csv')
         aum_file = os.path.join(strategy_directory, 'aum.csv')
@@ -840,7 +840,7 @@ class Processor:
                 strategy_count = strategy_counts.get(token, 0)
                 is_dust = data.get('is_dust', False)
                 is_mismatch = data.get('is_mismatch', False)
-                mismatch_count = data.get('mismatch_count', 0)
+                mismatch_duration = data.get('mismatch_duration', 0)
 
                 result[token] = {
                     'theo_qty': theo_qty,
@@ -853,7 +853,7 @@ class Processor:
                     'strategy_count': strategy_count,
                     'is_dust': is_dust,
                     'is_mismatch': is_mismatch,
-                    'mismatch_count': mismatch_count
+                    'mismatch_duration': mismatch_duration
                 }
             return result
         except Exception as e:
@@ -861,11 +861,11 @@ class Processor:
             logger.error(traceback.format_exc())
             return {}
         
-    async def check_multistrategy_position(self):
+    async def check_multistrategy_position(self, matching_delay_seconds = 300):
         """Compare aggregated theoretical and actual positions for all accounts, update self.multistrategy_matching, return messages."""
         messages = []
         self.multistrategy_matching = {}
-        mismatch_threshold_seconds = 60  # Threshold for mismatch duration in seconds
+        mismatch_threshold_seconds = matching_delay_seconds  
         for session in self.account_positions_theo_from_bot:
             matching_threshold = self.session_matching_configs[session]['tolerance_threshold']
             self.multistrategy_matching[session] = {}

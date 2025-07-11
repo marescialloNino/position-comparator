@@ -46,7 +46,7 @@ def multistrategy_matching_to_df(details_dict):
         main_df = pd.DataFrame.from_dict(details_dict, orient='index')
         main_df.reset_index(inplace=True)
         main_df.rename(columns={'index': 'token'}, inplace=True)
-        main_df = main_df[['token', 'theo_qty', 'real_qty', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count', 'is_dust', 'is_mismatch','mismatch_count']]
+        main_df = main_df[['token', 'theo_qty', 'real_qty', 'theo_amount', 'real_amount', 'ref_price', 'executing', 'matching', 'strategy_count', 'is_dust', 'is_mismatch','mismatch_duration']]
         main_df['theo_amount'] = main_df['theo_amount'].fillna(0).astype(int)
         main_df['real_amount'] = main_df['real_amount'].fillna(0).astype(int)
         main_df['ref_price'] = main_df['ref_price'].fillna(0.0)
@@ -62,12 +62,12 @@ def multistrategy_matching_to_df(details_dict):
         
         # Filter out dust positions from main DataFrame
         main_df = main_df[~main_df['is_dust']]
-        main_df = main_df[['token','theo_amount', 'real_amount', 'executing', 'matching', 'strategy_count','mismatch_count']]
+        main_df = main_df[['token','theo_amount', 'real_amount', 'executing', 'matching', 'strategy_count','mismatch_duration']]
         
         return main_df, summary_df
     except Exception as e:
         print(f"Error converting multistrategy matching data: {e}")
-        main_df = pd.DataFrame(columns=['token','theo_amount', 'real_amount', 'executing', 'matching', 'strategy_count','mismatch_count'])
+        main_df = pd.DataFrame(columns=['token','theo_amount', 'real_amount', 'executing', 'matching', 'strategy_count','mismatch_duration'])
         summary_df = pd.DataFrame({
             'Net Exposure': [0, 0],
             'Gross Exposure': [0, 0]
@@ -237,7 +237,8 @@ def multistrategy_matching_req(account):
                 'ref_price': format_ref_price,
                 'strategy_count': lambda x: f'{x:d}',
                 'is_dust': lambda x: str(x),
-                'is_mismatch': lambda x: str(x)
+                'is_mismatch': lambda x: str(x),
+                'mismatch_duration': lambda x: f'{x:.0f}' if pd.notna(x) else 'N/A',
             },
             classes='card',
             index=False
