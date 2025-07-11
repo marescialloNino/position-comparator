@@ -21,10 +21,10 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, account_key: s
     """
     Compare theoretical and real positions, prioritizing USD amounts when prices are available,
     falling back to quantities when prices are not available. Returns a dictionary with matching
-    results, dust/mismatch status, mismatch counts, and a list of mismatch messages.
+    results, dust/mismatch status, mismatch durations, and a list of mismatch messages.
     Dust is set to True if strategy_count == 0 and USD amount < 20% of median position size (when prices available),
     or if strategy_count == 0 and theo_qty == 0 and real_qty != 0 (when prices unavailable).
-    Requires processor instance for price cache, median position size, and mismatch counts.
+    Requires processor instance for price cache, median position size, and mismatch start times.
     """
     result = {}
     messages = []
@@ -36,11 +36,11 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, account_key: s
     if median_size == 0:
         logger.warning(f"Median position size is zero for {account_key}, dust checks may be inaccurate")
 
-    # Initialize mismatch_counts for session_key if not exists
-    if processor and not hasattr(processor, 'mismatch_counts'):
-        processor.mismatch_counts = {}
-    if processor and account_key not in processor.mismatch_counts:
-        processor.mismatch_counts[account_key] = {}
+    # Initialize mismatch_start_times for session_key if not exists
+    if processor and not hasattr(processor, 'mismatch_start_times'):
+        processor.mismatch_start_times = {}
+    if processor and account_key not in processor.mismatch_start_times:
+        processor.mismatch_start_times[account_key] = {}
 
     # Count strategies for each token
     strategy_counts = {}
@@ -131,14 +131,20 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, account_key: s
 
         matching = not is_mismatch
 
-        # Update mismatch count
-        mismatch_count = processor.mismatch_counts[account_key].get(asset, 0) if processor else 0
-        if is_mismatch:
-            mismatch_count += 1
-        else:
-            mismatch_count = 0  # Reset on match
+        # Update mismatch duration
+        mismatch_duration = 0
         if processor:
-            processor.mismatch_counts[account_key][asset] = mismatch_count
+            if is_mismatch:
+                if asset not in processor.mismatch_start_times[account_key]:
+                    # Record start time of mismatch
+                    processor.mismatch_start_times[account_key][asset] = current_time
+                else:
+                    # Calculate duration since first mismatch
+                    mismatch_duration = (current_time - processor.mismatch_start_times[account_key][asset]).total_seconds()
+            else:
+                # Reset start time on match
+                processor.mismatch_start_times[account_key][asset] = None
+                mismatch_duration = 0
 
         if is_mismatch:
             message = (
@@ -149,7 +155,7 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, account_key: s
             if price is not None:
                 message += f"Theoretical amount: {theo_amount:.2f} USD, Real amount: {real_amount:.2f} USD\n"
             message += f"Median position size: {median_size:.2f} USD\n"
-            message += f"Consecutive mismatches: {mismatch_count}\n"
+            message += f"Mismatch duration: {mismatch_duration:.0f} seconds\n"
             message += f"{', executing: True' if executing else ''}."
             messages.append(message)
 
@@ -163,7 +169,7 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, account_key: s
             'strategy_count': strategy_count,
             'is_dust': is_dust,
             'is_mismatch': is_mismatch,
-            'mismatch_count': mismatch_count
+            'mismatch_duration': mismatch_duration
         }
 
     # Check for tokens in real positions but not in theoretical positions
@@ -174,10 +180,8 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, account_key: s
             price = None
             if processor and exchange in processor.price_cache and asset in processor.price_cache[exchange]:
                 price_info = processor.price_cache[exchange][asset]
-                
                 price = price_info['price']
             else:
-                print(f"Price info for {processor.price_cache}")
                 logger.warning(f"No price available for {asset} on {exchange}, falling back to quantity comparison")
             real_amount = abs(real_qty * price) if price is not None else None
             is_dust = False
@@ -196,14 +200,17 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, account_key: s
                     is_dust = True
                     logger.info(f"Flagged {asset} as dust (quantity-based): real_qty={real_qty}, strategy_count=0")
 
-            # Update mismatch count
-            mismatch_count = processor.mismatch_counts[account_key].get(asset, 0) if processor else 0
-            if is_mismatch:
-                mismatch_count += 1
-            else:
-                mismatch_count = 0  # Reset on match
+            # Update mismatch duration
+            mismatch_duration = 0
             if processor:
-                processor.mismatch_counts[account_key][asset] = mismatch_count
+                if is_mismatch:
+                    if asset not in processor.mismatch_start_times[account_key]:
+                        processor.mismatch_start_times[account_key][asset] = current_time
+                    else:
+                        mismatch_duration = (current_time - processor.mismatch_start_times[account_key][asset]).total_seconds()
+                else:
+                    processor.mismatch_start_times[account_key][asset] = None
+                    mismatch_duration = 0
 
             result[asset] = {
                 'theo_qty': 0.0,
@@ -215,7 +222,7 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, account_key: s
                 'strategy_count': strategy_count,
                 'is_dust': is_dust,
                 'is_mismatch': is_mismatch,
-                'mismatch_count': mismatch_count
+                'mismatch_duration': mismatch_duration
             }
 
             if is_mismatch:
@@ -227,7 +234,7 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, account_key: s
                 if real_amount is not None:
                     message += f"Real amount: {real_amount:.2f} USD\n"
                 message += f"Median position size: {median_size:.2f} USD\n"
-                message += f"Consecutive mismatches: {mismatch_count}."
+                message += f"Mismatch duration: {mismatch_duration:.0f} seconds."
                 messages.append(message)
 
     return result, messages

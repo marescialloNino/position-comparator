@@ -865,6 +865,7 @@ class Processor:
         """Compare aggregated theoretical and actual positions for all accounts, update self.multistrategy_matching, return messages."""
         messages = []
         self.multistrategy_matching = {}
+        mismatch_threshold_seconds = 60  # Threshold for mismatch duration in seconds
         for session in self.account_positions_theo_from_bot:
             matching_threshold = self.session_matching_configs[session]['tolerance_threshold']
             self.multistrategy_matching[session] = {}
@@ -883,12 +884,12 @@ class Processor:
                     result, position_messages = compare_positions(theo_positions, real_positions, session_key, matching_threshold, processor=self)
                     self.multistrategy_matching[session][session_key] = result
                     logger.debug(f"Comparison result for {session}:{session_key}: {result}")
-                    # Filter messages based on mismatch_count >= 3
+                    # Filter messages based on mismatch_duration >= threshold_seconds
                     for message in position_messages:
-                        # Extract asset and check mismatch_count from result
+                        # Extract asset and check mismatch_duration from result
                         asset = message.split('Asset ')[1].split(' in ')[0]
-                        mismatch_count = result.get(asset, {}).get('mismatch_count', 0)
-                        if mismatch_count >= 3:
+                        mismatch_duration = result.get(asset, {}).get('mismatch_duration', 0)
+                        if mismatch_duration >= mismatch_threshold_seconds:
                             messages.append(message)
                 except Exception as e:
                     logger.error(f'Exception {e} during multistrategy position comparison for {session}:{session_key}')
