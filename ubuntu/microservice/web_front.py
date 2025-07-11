@@ -178,7 +178,7 @@ def pnl_req():
 def multistrategy_matching_req(account):
     exchange, account = account.split(':')
     session_name = exchange.replace('_fut', '')
-    account_key = f"{session_name}_{account}"
+    account_key = f"{account}"
     
     # Fetch multistrategy position details
     uri_details = GATEWAY + '/multistrategy_position_details'
@@ -306,8 +306,9 @@ def main():
                 strat_params = json.load(myfile)
                 for strat, strat_param in strat_params['strategy'].items():
                     if strat_param['active'] and strat_param['send_orders'] != 'dummy':
-                        account_dict[exchange].add(strat_param['account_trade'])
-                        multi_account_dict[exchange].add(strat_param['account_trade'])
+                        account_key = f"{strat_param['exchange_trade']}_{strat_param['account_trade']}"
+                        account_dict[exchange].add(account_key)
+                        multi_account_dict[exchange].add(account_key)
                 with use_scope('multiply'):
                     exchange_label = exchange
                     if 'bin' in exchange and 'spot' not in exchange:

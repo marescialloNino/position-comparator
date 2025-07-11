@@ -33,8 +33,8 @@ class BinanceMarket(MotherFeeder):
             self.__API_SEC = os.environ['BINANCE_PAIRSPREAD2_API_SECRET']
             self.__PASS__ = ''
         else:
-            self.__API_KEY = os.environ['BINANCE_TRADE_API_KEY']
-            self.__API_SEC = os.environ['BINANCE_TRADE_API_SECRET']
+            self.__API_KEY = ''
+            self.__API_SEC = ''
             self.__PASS__ = ''
 
         self.__LIMIT = 960

@@ -44,10 +44,8 @@ class BrokerHandler:
 
     @staticmethod
     def build_end_point(market, account=0) -> MotherFeeder:
-        if 'bin' in market and 'fut' not in market:
+        if market == 'binance':
             end_point = bnf.BinanceMarket(account=account, request_timeout=30000)
-        elif 'bin' in market and 'fut' in market:
-            end_point = bnf.BinanceFutureMarket(account=account, request_timeout=30000)
         elif market == 'okex' or market == 'okexfut' or market == 'okx' or market == 'okxfut':
             end_point = okf.OkexMarket(account=account, request_timeout=60000)
         elif market == 'bybit':

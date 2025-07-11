@@ -17,7 +17,7 @@ def within_tolerance(value1: float, value2: float, tolerance: float = 0.1) -> bo
         return abs(value1 - value2) < 1e-8
     return abs(value1 - value2) / abs(value1 + value2) <= tolerance
 
-def compare_positions(theo_positions: Dict, real_positions: Dict, session_key: str, tolerance: float = 0.1, processor=None) -> Tuple[Dict, List[str]]:
+def compare_positions(theo_positions: Dict, real_positions: Dict, account_key: str, tolerance: float = 0.1, processor=None) -> Tuple[Dict, List[str]]:
     """
     Compare theoretical and real positions, prioritizing USD amounts when prices are available,
     falling back to quantities when prices are not available. Returns a dictionary with matching
@@ -28,26 +28,26 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, session_key: s
     """
     result = {}
     messages = []
-    exchange = session_key.split('_')[0]
+    exchange = account_key.split('_')[0]
     current_time = datetime.utcnow()
     
     # Get median position size from processor
-    median_size = processor.median_position_sizes.get(session_key, 0) if processor else 0
+    median_size = processor.median_position_sizes.get(account_key, 0) if processor else 0
     if median_size == 0:
-        logger.warning(f"Median position size is zero for {session_key}, dust checks may be inaccurate")
+        logger.warning(f"Median position size is zero for {account_key}, dust checks may be inaccurate")
 
     # Initialize mismatch_counts for session_key if not exists
     if processor and not hasattr(processor, 'mismatch_counts'):
         processor.mismatch_counts = {}
-    if processor and session_key not in processor.mismatch_counts:
-        processor.mismatch_counts[session_key] = {}
+    if processor and account_key not in processor.mismatch_counts:
+        processor.mismatch_counts[account_key] = {}
 
     # Count strategies for each token
     strategy_counts = {}
     if processor:
         working_directory = processor.session_configs.get(exchange, {}).get('working_directory', '')
         for strategy_name, (strat_exchange, strat_account) in processor.used_accounts.get(exchange, {}).items():
-            if f"{strat_exchange}_{strat_account}" == session_key:
+            if f"{strat_exchange}_{strat_account}" == account_key:
                 strategy_dir = os.path.join(working_directory, strategy_name)
                 state_file = os.path.join(strategy_dir, 'current_state.json')
                 if os.path.exists(state_file):
@@ -132,18 +132,18 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, session_key: s
         matching = not is_mismatch
 
         # Update mismatch count
-        mismatch_count = processor.mismatch_counts[session_key].get(asset, 0) if processor else 0
+        mismatch_count = processor.mismatch_counts[account_key].get(asset, 0) if processor else 0
         if is_mismatch:
             mismatch_count += 1
         else:
             mismatch_count = 0  # Reset on match
         if processor:
-            processor.mismatch_counts[session_key][asset] = mismatch_count
+            processor.mismatch_counts[account_key][asset] = mismatch_count
 
         if is_mismatch:
             message = (
                 f"** POSITION MISMATCH **\n"
-                f"Asset {asset} in {session_key} has {'amount' if price is not None else 'quantity'} mismatch.\n"
+                f"Asset {asset} in {account_key} has {'amount' if price is not None else 'quantity'} mismatch.\n"
                 f"Theoretical qty: {theo_qty}, Real qty: {real_qty}, Strategy count: {strategy_count}\n"
             )
             if price is not None:
@@ -174,8 +174,10 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, session_key: s
             price = None
             if processor and exchange in processor.price_cache and asset in processor.price_cache[exchange]:
                 price_info = processor.price_cache[exchange][asset]
+                
                 price = price_info['price']
             else:
+                print(f"Price info for {processor.price_cache}")
                 logger.warning(f"No price available for {asset} on {exchange}, falling back to quantity comparison")
             real_amount = abs(real_qty * price) if price is not None else None
             is_dust = False
@@ -195,13 +197,13 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, session_key: s
                     logger.info(f"Flagged {asset} as dust (quantity-based): real_qty={real_qty}, strategy_count=0")
 
             # Update mismatch count
-            mismatch_count = processor.mismatch_counts[session_key].get(asset, 0) if processor else 0
+            mismatch_count = processor.mismatch_counts[account_key].get(asset, 0) if processor else 0
             if is_mismatch:
                 mismatch_count += 1
             else:
                 mismatch_count = 0  # Reset on match
             if processor:
-                processor.mismatch_counts[session_key][asset] = mismatch_count
+                processor.mismatch_counts[account_key][asset] = mismatch_count
 
             result[asset] = {
                 'theo_qty': 0.0,
@@ -219,7 +221,7 @@ def compare_positions(theo_positions: Dict, real_positions: Dict, session_key: s
             if is_mismatch:
                 message = (
                     f"** POSITION MISMATCH **\n"
-                    f"Asset {asset} in {session_key} found in real positions but not in theoretical.\n"
+                    f"Asset {asset} in {account_key} found in real positions but not in theoretical.\n"
                     f"Real qty: {real_qty}, Strategy count: {strategy_count}\n"
                 )
                 if real_amount is not None:

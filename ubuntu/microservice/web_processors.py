@@ -178,6 +178,7 @@ class Processor:
                 account_key = '_'.join((trade_exchange, account))
                 logger.info(f'Getting account positions for {account_key}')
                 trade_account_dir = os.path.join(working_directory, account_key)
+                print(f'Checking positions for {account_key} in {trade_account_dir}')
                 actual_pos_file = os.path.join(trade_account_dir, 'current_state.pos')
                 if not os.path.exists(actual_pos_file):
                     logger.warning(f'Position file {actual_pos_file} does not exist')
@@ -658,22 +659,9 @@ class Processor:
                     logger.error(f'Exception {e.args[0]} during check of {strat}@{exchange}')
         return messages
 
-    async def fetch_token_prices(self, exchange, tokens):
+    async def fetch_token_prices(self, exchange_name, tokens):
         """Fetch current prices for a list of tokens from the exchange."""
-        logger.info(f"Fetching token prices for {exchange}: {tokens}")
-        if 'ok' in exchange:
-            exchange_name = 'okexfut'
-        elif 'bin' in exchange and 'fut' in exchange:
-            exchange_name = 'binancefut'
-        elif 'bin' in exchange:
-            exchange_name = 'binance'
-        elif 'byb' in exchange:
-            exchange_name = 'bybit'
-        elif 'bitget' in exchange:
-            exchange_name = 'bitget'
-        else:
-            logger.warning(f"Unknown exchange {exchange}")
-            return {token: None for token in tokens}
+        logger.info(f"Fetching token prices for {exchange_name}: {tokens}")
         
         params = {'exchange_trade': 'dummy', 'account_trade': 'dummy'}
         end_point = BrokerHandler.build_end_point(exchange_name, 'dummy')
@@ -698,13 +686,13 @@ class Processor:
                 price = symbol_prices.get(symbol)
                 prices[token] = price
                 if price is not None:
-                    if exchange not in self.price_cache:
-                        self.price_cache[exchange] = {}
-                    self.price_cache[exchange][token] = {'price': price, 'timestamp': datetime.utcnow()}
-                    logger.info(f"Updated price cache for {exchange}:{token} = {price}")
+                    if exchange_name not in self.price_cache:
+                        self.price_cache[exchange_name] = {}
+                    self.price_cache[exchange_name][token] = {'price': price, 'timestamp': datetime.utcnow()}
+                    
                 else:
                     logger.warning(f"No 'last' price in ticker for {token} ({symbol}) on {exchange_name}")
-            
+            logger.info(f"Updated price cache for {exchange_name}")
             await end_point._exchange_async.close()
             await bh.close_exchange_async()
             return prices
@@ -725,55 +713,54 @@ class Processor:
 
             # Iterate over sessions
             for session in self.session_configs:
-                exchange = session
-                if exchange not in self.price_cache:
-                    self.price_cache[exchange] = {}
-                
+     
                 # Collect all tokens for the session
                 tokens = set()
                 for session_key in self.account_positions_from_bot.get(session, {}):
                     for token in self.account_positions_from_bot[session].get(session_key, {}).get('pose', {}):
                         tokens.add(token)
-                
-                # Fetch prices for all tokens at once
-                try:
-                    token_prices = await self.fetch_token_prices(exchange, list(tokens))  # Pass list of tokens
-                    for token, price in token_prices.items():
-                        if price is not None:
-                            self.price_cache[exchange][token] = {'price': price, 'timestamp': datetime.utcnow()}
-                            logger.debug(f"Fetched price for {exchange}:{token} = {price}")
-                        else:
-                            logger.warning(f"Failed to fetch price for {exchange}:{token}")
-                except Exception as e:
-                    logger.error(f"Error fetching prices for {exchange}: {str(e)}")
-                    for token in tokens:
-                        self.price_cache[exchange][token] = {'price': None, 'timestamp': datetime.utcnow()}
-                        logger.warning(f"Set price to None for {exchange}:{token} due to fetch error")
-                
-                # Compute median position size per session_key
-                for session_key in self.account_positions_from_bot.get(session, {}):
-                    amounts = []
-                    for token, pos in self.account_positions_from_bot[session].get(session_key, {}).get('pose', {}).items():
-                        qty = pos.get('quantity', 0)
-                        price = self.price_cache[exchange].get(token, {}).get('price')
-                        if price is not None and qty != 0:
-                            amount = abs(qty * price)
-                            if amount > 100:  # Filter out small amounts
-                                amounts.append(amount)
+                        exchange_trade = session_key.split('_')[0]  
+                    if exchange_trade not in self.price_cache:
+                        self.price_cache[exchange_trade] = {}
+                    # Fetch prices for all tokens at once
+                    try:
+                        token_prices = await self.fetch_token_prices(exchange_trade, list(tokens))  # Pass list of tokens
+                        for token, price in token_prices.items():
+                            if price is not None:
+                                self.price_cache[exchange_trade][token] = {'price': price, 'timestamp': datetime.utcnow()}
+                                logger.debug(f"Fetched price for {exchange_trade}:{token} = {price}")
+                            else:
+                                logger.warning(f"Failed to fetch price for {exchange_trade}:{token}")
+                    except Exception as e:
+                        logger.error(f"Error fetching prices for {exchange_trade}: {str(e)}")
+                        for token in tokens:
+                            self.price_cache[exchange_trade][token] = {'price': None, 'timestamp': datetime.utcnow()}
+                            logger.warning(f"Set price to None for {exchange_trade}:{token} due to fetch error")
+                               
+                    # Compute median position size per session_key
+                    for session_key in self.account_positions_from_bot.get(session, {}):
+                        amounts = []
+                        for token, pos in self.account_positions_from_bot[session].get(session_key, {}).get('pose', {}).items():
+                            qty = pos.get('quantity', 0)
+                            price = self.price_cache[exchange_trade].get(token, {}).get('price')
+                            if price is not None and qty != 0:
+                                amount = abs(qty * price)
+                                if amount > 100:  # Filter out small amounts
+                                    amounts.append(amount)
                     
-                    # Calculate median position size
-                    if amounts:
-                        median_size = np.median(amounts)
-                        self.median_position_sizes[session_key] = median_size
-                        logger.info(f"Median position size for {session_key}: {median_size:.2f} USD")
-                    else:
-                        self.median_position_sizes[session_key] = 0
-                        logger.warning(f"No valid amounts for median calculation for {session_key}")
-                
-                self.last_price_update[exchange] = datetime.utcnow()
+                        # Calculate median position size
+                        if amounts:
+                            median_size = np.median(amounts)
+                            self.median_position_sizes[session_key] = median_size
+                            logger.info(f"Median position size for {session_key}: {median_size:.2f} USD")
+                        else:
+                            self.median_position_sizes[session_key] = 0
+                            logger.warning(f"No valid amounts for median calculation for {session_key}")
+                    
+                    self.last_price_update[exchange_trade] = datetime.utcnow()
         except Exception as e:
-            logger.error(f"Error in update_prices_and_median: {str(e)}")
-            logger.error(traceback.format_exc())
+                logger.error(f"Error in update_prices_and_median: {str(e)}")
+                logger.error(traceback.format_exc())
 
     async def get_multistrategy_position_details(self, session, account_key):
         """Fetch detailed position data with prices and strategy counts from self.multistrategy_matching using cached prices."""
@@ -942,19 +929,8 @@ class Processor:
                     self.strategy_state[session] = {}
                 self.strategy_state[session][strategy_name] = state
 
-    async def get_account_position(self, exchange, account):
-        if 'ok' in exchange:
-            exchange_name = 'okexfut'
-        elif 'bin' in exchange and 'fut' in exchange:
-            exchange_name = 'binancefut'
-        elif 'bin' in exchange:
-            exchange_name = 'binance'
-        elif 'byb' in exchange:
-            exchange_name = 'bybit'
-        elif 'bitget' in exchange:
-            exchange_name = 'bitget'
-        else:
-            return {}
+    async def get_account_position(self, exchange_name, account):
+        
         params = {
             'exchange_trade': 'dummy',
             'account_trade': account
