@@ -169,16 +169,18 @@ class Processor:
             for strategy_name, (trade_exchange, account) in accounts.items():
                 if (trade_exchange, account) not in account_list[session]:
                     account_list[session].append((trade_exchange, account))
+            logger.info(f'Account list for session {session}: {account_list[session]}')
             if session not in self.account_positions_from_bot:
                 self.account_positions_from_bot[session] = {}
             if session not in self.account_positions_theo_from_bot:
                 self.account_positions_theo_from_bot[session] = {}
             working_directory = self.session_configs[session]['working_directory']
+            logger.info(f'Working directory for session {session} is {working_directory}')
             for (trade_exchange, account) in account_list[session]:
                 account_key = '_'.join((trade_exchange, account))
                 logger.info(f'Getting account positions for {account_key}')
                 trade_account_dir = os.path.join(working_directory, account_key)
-                print(f'Checking positions for {account_key} in {trade_account_dir}')
+                print(f'Checking positions for account {account_key} in {trade_account_dir}')
                 actual_pos_file = os.path.join(trade_account_dir, 'current_state.pos')
                 if not os.path.exists(actual_pos_file):
                     logger.warning(f'Position file {actual_pos_file} does not exist')
@@ -208,6 +210,7 @@ class Processor:
                         self.account_positions_from_bot[session][account_key] = {'pose': {}}
                 strategy_positions = []
                 for strategy_name, (strat_exchange, strat_account) in accounts.items():
+                    logger.info(f'Checking strategy {strategy_name}  strat_account: {strat_account} account: {account_key}')
                     if strat_account == account and strat_exchange == trade_exchange:
                         strategy_dir = os.path.join(working_directory, strategy_name)
                         state_file = os.path.join(strategy_dir, 'current_state.json')
@@ -229,6 +232,8 @@ class Processor:
                                 logger.error(f'Error reading {state_file}: {str(e)}')
                                 strategy_positions.append({})
                 try:
+                    logger.info(f'account_positions_theo_from_bot for session {session}: {self.account_positions_theo_from_bot[session]}')
+                    logger.info(f'Aggregating theoretical positions for {account_key}: aggr positions: {aggregated_theo}')
                     aggregated_theo = await aggregate_theo_positions(strategy_positions)
                     self.account_positions_theo_from_bot[session][account_key] = aggregated_theo
                     logger.info(f'Aggregated positions for {account_key}')
@@ -869,7 +874,9 @@ class Processor:
         for session in self.account_positions_theo_from_bot:
             matching_threshold = self.session_matching_configs[session]['tolerance_threshold']
             self.multistrategy_matching[session] = {}
+            logger.info(f"Checking multistrategy position for session {session}")
             for session_key in self.account_positions_theo_from_bot[session]:
+                logger.info(f"Checking multistrategy position for session {session}: account:{session_key}")
                 try:
                     logger.info(f"Processing multistrategy position for {session}:{session_key}")
                     theo_positions = self.account_positions_theo_from_bot.get(session, {}).get(session_key, {}).get('pose', {})
@@ -1201,7 +1208,7 @@ def runner(event, processor, pace):
                 logger.error(f"Error in multistrat_summary for {account_or_strategy}: {str(e)}")
                 logger.error(traceback.format_exc())
                 raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-        ports = [14440, 14441, 14442]
+        ports = [14440]
         server = None
         for port in ports:
             try:
